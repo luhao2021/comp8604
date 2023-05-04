@@ -40,8 +40,6 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-a
 
 Normally there should not be an issue for this stage. However, the access to the hostname “raw.githubusercontent.com” is quite unstable at my side. Then I download the file “ros.key” and create the “/usr/share/keyrings/ros-archive-keyring.gpg” manually based on the content of file “ros.key”.
 
-
-
 ### **1.1.3 Install ROS 2 packages**
 
 The official steps are:
@@ -61,12 +59,9 @@ sudo apt install ros-humble-ros-base
 
 # Development tools: compilers and other tools to build ROS
 sudo apt install ros-dev-tools
-
 ```
 
 For me, I run the first three “apt install” commands, as I need the GUI feature. This step will cost several minutes depending on the network speed.
-
-
 
 ### **1.1.4 Try simple examples**
 
@@ -84,11 +79,9 @@ ros2 run demo_nodes_py listener
 
 Now we can see the talker publishing “Hello World” message with index, and the listener printing “I heard” messages.
 
-![](/home/hao/Workspace/COMP8604/comp8604/images/1.1.4.png)
+![](./images/1.1.4.png)
 
 Note: I verified that the above steps for ROS2 humble installation also apply to Windows WSL 2 for Ubuntu 22.04.
-
-
 
 ## 1.2 MoveIt 2 Setup
 
@@ -126,8 +119,6 @@ sudo apt install python3-vcstool
 
 If can execute above commands successfully, I recommend to follow the official steps to avoid debugging the compiling issues.
 
-
-
 ### 1.2.3 Download MoveIt 2 source code
 
 In this step, I first create a folder as colcon workspace, and then download the source code of MoveIt 2 and tutorials into this folder.
@@ -140,8 +131,6 @@ vcs import < moveit2_tutorials/moveit2_tutorials.repos
 ```
 
 The “vcs import” in last step may not work stable sometimes, you can just ctrl-c and then re-run it.
-
-
 
 ### 1.2.4 Compile the source code
 
@@ -293,8 +282,6 @@ hao@hao-XPS-17-9710:~/Workspace/COMP8604/ROS/workspaces/moveit2_ws$
 
 Note: please ignore the time showed in above log, it is quite fast as I just re-run the command again on the project which is already fully compiled, so it only print out messages without actual compiling.
 
-
-
 ### 1.2.5 Setup the workspace
 
 Now we can source the bash script to apply the environment variables of MoveIt 2:
@@ -315,15 +302,13 @@ I didn’t try the default ROS 2 RMW, and followed the exactly the above command
 
 [Note:] Need to disable the last line to make RViz work normally.
 
-
-
 # 2. Simulators and Demo
 
 ## 2.1 ROS2 Tutorials
 
 Once the ROS2 is installed successfully. The first thing I did was go through the ROS2 tutorials. The main official link for the ROS2 tutorial is: [https://docs.ros.org/en/humble/Tutorials.html](https://www.google.com/url?q=https://docs.ros.org/en/humble/Tutorials.html&sa=D&source=editors&ust=1683129835307756&usg=AOvVaw3Jrz-aX-tPesJvZq7OxbrL). We can see from the link that there are different levels of tutorials, which are beginner, intermediate and advanced. For me, I mainly go through the two beginner sessions, see below:
 
-<img title="" src="file:///home/hao/Workspace/COMP8604/comp8604/images/2.1.png" alt=":" width="297" data-align="inline">       <img title="" src="file:///home/hao/Workspace/COMP8604/comp8604/images/2.1_1.png" alt="fw" width="310" data-align="inline">
+<img title="" src="./images/2.1.png" alt=":" width="297" data-align="inline">       <img title="" src="./images/2.1_1.png" alt="d" width="308">
 
 I think these two sessions are necessary for beginners to have an understanding of basic ROS2 concepts, like the nodes, topics, services, parameters and actions. In the second beginner session, we can have some hand-on coding experience to understand the ROS2 api to implement publisher and subscriber, service and client, and custom interfaces. In the meeting with Rahul in the upcoming week, he told me that having basic knowledge of ROS2 is enough, I should put more effort into how the motion planning algorithm is integrated into the demo. ROS2 is mainly a platform to provide various services.
 
@@ -336,8 +321,6 @@ echo “export ROS_DOMAIN_ID=21” >> ~/.bashrc
 ```
 
 The “ROS_DOMAIN_ID” is a unique integer I selected for all my ROS2 nodes so that they can communicate with each other from different shells. I also apply “ROS_LOCALHOST_ONLY” to limit the communication locally for now as I don’t need to communicate with nodes on other computers through the network currently.
-
-
 
 ## 2.2 Turtlebot3 Simulating
 
@@ -352,8 +335,6 @@ The first demo I intended to try was this turtlebot3 simulation demo, which is i
 4. Learning SLAM in simulation:[https://github.com/cyberbotics/webots_ros2/wiki/SLAM-with-TurtleBot3](https://www.google.com/url?q=https://github.com/cyberbotics/webots_ros2/wiki/SLAM-with-TurtleBot3&sa=D&source=editors&ust=1683129835311413&usg=AOvVaw1vuSBUlxM-na-1R8rs3c3K)
 
 However, the latest turtlebot3 doesn’t support ROS2 humble according to its official website at the time this document is drafted(2023.4), and the latest ROS2 version is Foxy. As I only have Ubuntu 22.04 installed on my PC, I tried two methods to try to enable turtlebot3 simulation, which are illustrated in the two sections below.
-
-
 
 ### 2.2.1 Run on Windows WSL2 for Ubuntu 20.04.
 
@@ -487,13 +468,11 @@ urdf_file_name : turtlebot3_waffle_pi.urdf
 
 I think this may be related to the limited support of Gazebo on Windows WSL2, but I don’t have another Ubuntu 20.04 for testing. Currently, I leave it here until I need to debug it on WSL2.
 
-
-
 ### 2.2.2 Run on Ubuntu 22.04 ROS2 humble.
 
 The main reason to try turtlebot3 on ROS2 humble is I already have a workable ROS2 humble and Ubuntu 22.04 PC ready. Besides, I see from the turtlebot3 github source that most of required package already have humble-devel branch, and also marked as “passing”, see below picture which is from github link: [https://github.com/ROBOTIS-GIT/turtlebot3/tree/humble-devel](https://www.google.com/url?q=https://github.com/ROBOTIS-GIT/turtlebot3/tree/humble-devel&sa=D&source=editors&ust=1683129835321774&usg=AOvVaw24cRdp3hp7_eE89QKpHlCO).
 
-![dd](/home/hao/Workspace/COMP8604/comp8604/images/2.2.2.png)
+![dd](./images/2.2.2.png)
 
 Basically I follow the similar procedure as the last section, except I use below commands to install the gazebo package for humble instead of foxy.
 
@@ -630,7 +609,7 @@ To launch the simulator, I run the similar commands as the last section. There a
    
    The screenshot of gazebo simulator is as below:
    
-   ![df](/home/hao/Workspace/COMP8604/comp8604/images/2.2.2_1.png)
+   ![df](./images/2.2.2_1.png)
 
 2. World
    
@@ -681,7 +660,7 @@ To launch the simulator, I run the similar commands as the last section. There a
    [INFO] [spawn_entity.py-4]: process has finished cleanly [pid 747739]
    ```
    
-   ![dd](/home/hao/Workspace/COMP8604/comp8604/images/2.2.2_2.png)
+   ![dd](./images/2.2.2_2.png)
    
    It turns out that by doing the steps in this section, I manage to run the turtlebot3 simulator successfully based on ROS2 Humble on Ubuntu 22.04.
    
@@ -692,8 +671,6 @@ To launch the simulator, I run the similar commands as the last section. There a
    ```
    
    This message also occurs in the above two experiments. I guess the gazebo freezes because it performs rendering by using CPU instead of utilizing the cuda GPU driver and rendering on my Nvidia GPU card. May need more debugging in future if I plan to fix this.
-   
-   
 
 ## 2.3 MoveIt2 Planning Around Object Demo
 
@@ -701,9 +678,9 @@ This is a demo which shows how to perform simple planning which has an obstacle 
 
 First let’s look at the below three pictures for: a) initial state, b) planning, c) executing. We can see that the whole process is visualized, the robot arm moves to the target along the planned trajectory to avoid the collision object.
 
-   ![dd](/home/hao/Workspace/COMP8604/comp8604/images/2.3_2.png)   ![dd](/home/hao/Workspace/COMP8604/comp8604/images/2.3_3.png)  
+   ![dd](./images/2.3_2.png)   ![dd](./images/2.3_3.png)
 
-![dd](/home/hao/Workspace/COMP8604/comp8604/images/2.3_1.png)
+![dd](./images/2.3_1.png)
 
 For the details of this tutorial, it can be found from: [planning around objects](https://www.google.com/url?q=https://moveit.picknik.ai/humble/doc/tutorials/planning_around_objects/planning_around_objects.html&sa=D&source=editors&ust=1683129835335930&usg=AOvVaw3GVvkjMH0Xt6Dymc9fHryH). Basically we need to follow below major steps:
 
@@ -792,13 +769,9 @@ For the details of this tutorial, it can be found from: [planning around object
    
    The launch file can be found in the source code of Moveit2.
 
-
-
 ## 2.4 MoveIt2 Pick-and-Place Demo
 
 I’ll leave this part for later, as it includes a combination of various different problems.
-
-
 
 # 3. Source Code Deep Dive
 
@@ -909,8 +882,6 @@ For the first time to learn the concept of kinematics, there is a good online re
 
 I spent several days finishing the first 5 lectures last week, and plan to finish the whole lectures in the next two weeks using my spare time.
 
-
-
 ## 3.2 Motion Planning API
 
 In MoveIt2, motion planners are used as the plugin. Such design allows the flexible use of different motion planners. To indicate which motion planner you would like to use, we can add in the launch file below statements:
@@ -969,8 +940,6 @@ Then we can use the “get_parameter” method to acquire the parameter from the
 ```
 
 We can see that “planner_instance” is a pointer which points to “PlannerManager”. The instance of “PlannerManager” is created by the “createUnmanagedInstance” method. Once we have this instance of “PlannerManager” we can call the corresponding planner algorithms to perform the motion planning. After diving into the OMPL implementation of “PlannerManager”, I think the “PlannerManager” is only a wrapper class. The detailed implementation is done by the “PlanningContext” class.
-
-
 
 We can see from below snippets from file “moveit2/moveit_planners/ompl/ompl_interface/src/ ompl_planner_manager.cpp”:
 
