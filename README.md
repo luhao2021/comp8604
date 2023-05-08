@@ -40,7 +40,7 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-a
 
 Normally there should not be an issue for this stage. However, the access to the hostname “raw.githubusercontent.com” is quite unstable at my side. Then I download the file “ros.key” and create the “/usr/share/keyrings/ros-archive-keyring.gpg” manually based on the content of file “ros.key”.
 
-### **1.1.3 Install ROS 2 packages**
+### 1.1.3 Install ROS 2 packages
 
 The official steps are:
 
@@ -63,7 +63,7 @@ sudo apt install ros-dev-tools
 
 For me, I run the first three “apt install” commands, as I need the GUI feature. This step will cost several minutes depending on the network speed.
 
-### **1.1.4 Try simple examples**
+### 1.1.4 Try simple examples
 
 If everything goes well, now we should have ROS2 humble set up. Now we can run simple examples to verify this. First, we open two terminals, and run below for each terminal:
 
@@ -301,6 +301,45 @@ export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 I didn’t try the default ROS 2 RMW, and followed the exactly the above commands to use the cyclone DDS. 
 
 [Note:] Need to disable the last line to make RViz work normally.
+
+
+
+## 1.3 OMPL Setup
+
+### 1.3.1 OMPL Compile
+
+This section mainly refers to OMPL [official site](https://ompl.kavrakilab.org/) and [github page]([GitHub - ompl/ompl: The Open Motion Planning Library (OMPL)](https://github.com/ompl/ompl)). The OMPL version I use is 1.6.0, which match the one used by ROS Humble in my setup. This can be checked "/opt/ros/humble/share/ompl/package.xml".  To download the OMPL source code, simply run below command:
+
+```
+git clone https://github.com/ompl/ompl.git -b 1.6.0
+```
+
+Before compile the source code, I run below commands to install the dependencies:
+
+```
+sudo apt install python3-pip
+python3 -m venv ~/Workspace/pyvenv/ompl
+source ~/Workspace/pyvenv/ompl/bin/activate
+pip install -vU pygccxml pyplusplus castxml
+```
+
+This is because I already have boost, eigen, ode installed. Then run below commands to compile the ompl source code:
+
+```
+mkdir -p build/Release
+cd build/Release
+cmake --install-prefix=/home/hao/Workspace/COMP8604/OMPL/ompl/build/Release/install ../..
+# next step is optional
+make -j 4 update_bindings 
+make -j 4
+make install
+```
+
+After this, the compiled library and header files will be installed into the "install" directory, the python bindings will be installed into the path: '~/Workspace/pyvenv/ompl/lib/python3.10/site-packages/ompl'.
+
+[Note] If you met any problem when compile the ompl source code manually, you can refer to file 'install-ompl-ubuntu.sh', this script will download the ompl source code and install all the necessary dependencies before compile, and then install the ompl library into system directory.
+
+
 
 # 2. Simulators and Demo
 
@@ -882,7 +921,7 @@ For the first time to learn the concept of kinematics, there is a good online re
 
 I spent several days finishing the first 5 lectures last week, and plan to finish the whole lectures in the next two weeks using my spare time.
 
-## 3.2 Motion Planning API
+## 3.2 MoveIT2 Motion Planning API
 
 In MoveIt2, motion planners are used as the plugin. Such design allows the flexible use of different motion planners. To indicate which motion planner you would like to use, we can add in the launch file below statements:
 
@@ -1047,4 +1086,156 @@ display_publisher->publish(display_trajectory);
 /* Set the state in the planning scene to the final state of the last plan */
 robot_state->setJointGroupPositions(joint_model_group, response.trajectory.joint_trajectory.points.back().positions);
 planning_scene->setCurrentState(*robot_state.get());
+```
+
+
+
+## 3.3 MoveIT2 and OMPL Integration
+
+### 3.3.1 OMPL API Overview
+
+Below is the OMPL API diagram which shows the basic relationship between the critical base classes.
+
+![d](./images/3.3.1.png)
+
+We can see from above diagram that users are recommended to use class "SimpleSetup" to manipulate all other OMPL classes. This is what MoveIT2 does.
+
+
+
+### 3.3.2 MoveIT2 Integration
+
+As we mentioned, MoveIT2 also use class ompl::geometric::SimpleSetup to use OMPL libraries. This is done in below function:
+
+```
+ModelBasedPlanningContextPtr
+PlanningContextManager::getPlanningContext(const planning_interface::PlannerConfigurationSettings& config,
+                                           const ModelBasedStateSpaceFactoryPtr& factory,
+                                           const moveit_msgs::msg::MotionPlanRequest& req) const
+
+```
+
+The code snippet to initialize the class ompl::geometric::SimpleSetup is as below:
+
+```
+    if (factory->getType() == ConstrainedPlanningStateSpace::PARAMETERIZATION_TYPE)
+    {
+      RCLCPP_DEBUG_STREAM(LOGGER, "planning_context_manager: Using OMPL's constrained state space for planning.");
+
+      // Select the correct type of constraints based on the path constraints in the planning request.
+      ompl::base::ConstraintPtr ompl_constraint =
+          createOMPLConstraints(robot_model_, config.group, req.path_constraints);
+
+      // Create a constrained state space of type "projected state space".
+      // Other types are available, so we probably should add another setting to ompl_planning.yaml
+      // to choose between them.
+      context_spec.constrained_state_space_ =
+          std::make_shared<ob::ProjectedStateSpace>(context_spec.state_space_, ompl_constraint);
+
+      // Pass the constrained state space to ompl simple setup through the creation of a
+      // ConstrainedSpaceInformation object. This makes sure the state space is properly initialized.
+      context_spec.ompl_simple_setup_ = std::make_shared<ompl::geometric::SimpleSetup>(
+          std::make_shared<ob::ConstrainedSpaceInformation>(context_spec.constrained_state_space_));
+    }
+    else
+    {
+      // Choose the correct simple setup type to load
+      context_spec.ompl_simple_setup_ = std::make_shared<ompl::geometric::SimpleSetup>(context_spec.state_space_);
+    }
+
+```
+
+Therefore, when MoveIT2 application call "getPlanningContext" at upper lever, the entry "ompl_simepl_setup_" is initialized as class ompl::geometric::SimpleSetup. To specify which ompl planner is used, see below code snippet:
+
+```
+void ompl_interface::ModelBasedPlanningContext::useConfig()
+{
+  ...
+  it = cfg.find("type");
+  if (it == cfg.end())
+  {
+    if (name_ != getGroupName())
+      RCLCPP_WARN(LOGGER, "%s: Attribute 'type' not specified in planner configuration", name_.c_str());
+  }
+  else
+  {
+    std::string type = it->second;
+    cfg.erase(it);
+    const std::string planner_name = getGroupName() + "/" + name_;
+    ompl_simple_setup_->setPlannerAllocator(
+        [planner_name, &spec = this->spec_, allocator = spec_.planner_selector_(type)](
+            const ompl::base::SpaceInformationPtr& si) { return allocator(si, planner_name, spec); });
+    RCLCPP_INFO(LOGGER,
+                "Planner configuration '%s' will use planner '%s'. "
+                "Additional configuration parameters will be set when the planner is constructed.",
+                name_.c_str(), type.c_str());
+  }
+  ...
+}
+```
+
+From the above code, we can see that the variable 'allocator' is a returned function which is called to create the planner allocator, and the created allocator is passed into function "SimpleSetup::setPlannerAllocator". The function "accocator" point to is showed as below:
+
+```
+context_spec.planner_selector_ = getPlannerSelector();
+
+
+ConfiguredPlannerSelector PlanningContextManager::getPlannerSelector() const
+{
+  return [this](const std::string& planner) { return plannerSelector(planner); };
+}
+
+
+ConfiguredPlannerAllocator PlanningContextManager::plannerSelector(const std::string& planner) const
+{
+  auto it = known_planners_.find(planner);
+  if (it != known_planners_.end())
+  {
+    return it->second;
+  }
+  else
+  {
+    RCLCPP_ERROR(LOGGER, "Unknown planner: '%s'", planner.c_str());
+    return ConfiguredPlannerAllocator();
+  }
+}
+
+```
+
+We can see it will finally search from the map structure "known_planners_", which is filled by registering the allocators in advance:
+
+```
+void registerPlannerAllocator(const std::string& planner_id, const ConfiguredPlannerAllocator& pa)
+{
+  known_planners_[planner_id] = pa;
+}
+
+void PlanningContextManager::registerDefaultPlanners()
+{   
+  registerPlannerAllocatorHelper<og::AnytimePathShortening>("geometric::AnytimePathShortening");
+  registerPlannerAllocatorHelper<og::BFMT>("geometric::BFMT");
+  registerPlannerAllocatorHelper<og::BiEST>("geometric::BiEST");
+  registerPlannerAllocatorHelper<og::BiTRRT>("geometric::BiTRRT");
+  registerPlannerAllocatorHelper<og::BKPIECE1>("geometric::BKPIECE");
+  registerPlannerAllocatorHelper<og::EST>("geometric::EST");
+  registerPlannerAllocatorHelper<og::FMT>("geometric::FMT");
+  registerPlannerAllocatorHelper<og::KPIECE1>("geometric::KPIECE");
+  registerPlannerAllocatorHelper<og::LazyPRM>("geometric::LazyPRM");
+  registerPlannerAllocatorHelper<og::LazyPRMstar>("geometric::LazyPRMstar");
+  registerPlannerAllocatorHelper<og::LazyRRT>("geometric::LazyRRT");
+  registerPlannerAllocatorHelper<og::LBKPIECE1>("geometric::LBKPIECE");
+  registerPlannerAllocatorHelper<og::LBTRRT>("geometric::LBTRRT");
+  registerPlannerAllocatorHelper<og::PDST>("geometric::PDST");
+  registerPlannerAllocatorHelper<og::PRM>("geometric::PRM");
+  registerPlannerAllocatorHelper<og::PRMstar>("geometric::PRMstar");
+  registerPlannerAllocatorHelper<og::ProjEST>("geometric::ProjEST");
+  registerPlannerAllocatorHelper<og::RRT>("geometric::RRT");
+  registerPlannerAllocatorHelper<og::RRTConnect>("geometric::RRTConnect");
+  registerPlannerAllocatorHelper<og::RRTstar>("geometric::RRTstar");
+  registerPlannerAllocatorHelper<og::SBL>("geometric::SBL");
+  registerPlannerAllocatorHelper<og::SPARS>("geometric::SPARS");
+  registerPlannerAllocatorHelper<og::SPARStwo>("geometric::SPARStwo");
+  registerPlannerAllocatorHelper<og::STRIDE>("geometric::STRIDE");
+  registerPlannerAllocatorHelper<og::TRRT>("geometric::TRRT");
+}
+
 ```
