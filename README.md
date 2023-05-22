@@ -302,8 +302,6 @@ I didn’t try the default ROS 2 RMW, and followed the exactly the above command
 
 [Note:] Need to disable the last line to make RViz work normally.
 
-
-
 ## 1.3 OMPL Setup
 
 ### 1.3.1 OMPL Compile
@@ -338,8 +336,6 @@ make install
 After this, the compiled library and header files will be installed into the "install" directory, the python bindings will be installed into the path: '~/Workspace/pyvenv/ompl/lib/python3.10/site-packages/ompl'.
 
 [Note] If you met any problem when compile the ompl source code manually, you can refer to file 'install-ompl-ubuntu.sh', this script will download the ompl source code and install all the necessary dependencies before compile, and then install the ompl library into system directory.
-
-
 
 # 2. Simulators and Demo
 
@@ -1088,8 +1084,6 @@ robot_state->setJointGroupPositions(joint_model_group, response.trajectory.joint
 planning_scene->setCurrentState(*robot_state.get());
 ```
 
-
-
 ## 3.3 MoveIT2 and OMPL Integration
 
 ### 3.3.1 OMPL API Overview
@@ -1100,8 +1094,6 @@ Below is the OMPL API diagram which shows the basic relationship between the cri
 
 We can see from above diagram that users are recommended to use class "SimpleSetup" to manipulate all other OMPL classes. This is what MoveIT2 does.
 
-
-
 ### 3.3.2 MoveIT2 Integration
 
 As we mentioned, MoveIT2 also use class ompl::geometric::SimpleSetup to use OMPL libraries. This is done in below function:
@@ -1111,7 +1103,6 @@ ModelBasedPlanningContextPtr
 PlanningContextManager::getPlanningContext(const planning_interface::PlannerConfigurationSettings& config,
                                            const ModelBasedStateSpaceFactoryPtr& factory,
                                            const moveit_msgs::msg::MotionPlanRequest& req) const
-
 ```
 
 The code snippet to initialize the class ompl::geometric::SimpleSetup is as below:
@@ -1141,7 +1132,6 @@ The code snippet to initialize the class ompl::geometric::SimpleSetup is as belo
       // Choose the correct simple setup type to load
       context_spec.ompl_simple_setup_ = std::make_shared<ompl::geometric::SimpleSetup>(context_spec.state_space_);
     }
-
 ```
 
 Therefore, when MoveIT2 application call "getPlanningContext" at upper lever, the entry "ompl_simepl_setup_" is initialized as class ompl::geometric::SimpleSetup. To specify which ompl planner is used, see below code snippet:
@@ -1198,7 +1188,6 @@ ConfiguredPlannerAllocator PlanningContextManager::plannerSelector(const std::st
     return ConfiguredPlannerAllocator();
   }
 }
-
 ```
 
 We can see it will finally search from the map structure "known_planners_", which is filled by registering the allocators in advance:
@@ -1237,5 +1226,389 @@ void PlanningContextManager::registerDefaultPlanners()
   registerPlannerAllocatorHelper<og::STRIDE>("geometric::STRIDE");
   registerPlannerAllocatorHelper<og::TRRT>("geometric::TRRT");
 }
+```
+
+# 4. Customized Planner
+
+## 4.1 Create OMPL-based algorithm
+
+Basically, there are two ways to create OMPL-based planning algorithm: 1) add the algorithm in OMPL source code directly, and compile the algorithm into OMPL library; 2) implement separate planning algorithm in ROS2 package which depends on OMPL. In this section, we will introduce both these two methods. To simplify the implementation, we copy the PRM and RRT* algorithm to generate new MyPRM and MyRRT algorithm which did exactly the same thing but with different algorithm name.
+
+### 4.1.1 Add in OMPL source code directly
+
+This is the simplest way to implement a new OMPL-based planning algorithm, as we don't need to care about how to define the dependency. What I did is simply find the directory where RRT* and PRM is implemented, and create new .cpp file and .h file accordingly. Let's take the RRT for example, the .cpp file and .h header file are in directory "src/ompl/geometric/planners/rrt", and the first step is to create our new .cpp file and header file:
+
+![a](images/4.1.1.png)
+
+The next step is to change the class name from RRTstar to MyRRT, for example, the change of header file is:
+
+![a](images/4.1.1_1.png)
+
+We can do similar thing to MyRRT.cpp, and don't forget to change the header file name of #include instruction.
+
+
+
+When all the above is done, we can re-compile the OMPL and generate new .so file which include our MyRRT algorithm. Here we don't need to change the CMakeLists.txt to add our new .cpp file as the current CMakeLists.txt will emurate and compile all .cpp file in folder geometric.
+
+### 4.1.2 Create OMPL dependent ROS2 package
+
+The method in last section is simple, but it also means we contaminate the OMPL source tree inevitably, and everythime we modify our customized planning algorithm we need to re-compile the whole OMPL library. It's better to implement our planning algorithm outside the OMPL so that we can maintain our planning algorithm independently. This is a good engineering paratice. In this section, we implement our customized planning algorithm with ROS2 package.
+
+First, we create the ROS2 package:
 
 ```
+ros2 pkg create --build-type ament_cmake customized_planner
+```
+
+Then, we create below directory structure:
+
+![a](images/4.1.2.png)
+
+We can see from the screenshot that we create our own copy of PRM and RRT algorithm, which are both from OMPL source code. We put the .cpp files into src folder, and header files in include/customized_planner folder.
+
+Now we begin to write our own CMakeLists.txt as we need to add dependency so that our algorithm can be correctly built by ROS2 building system. We add below line to do this:
+
+```
+set(PLANNER_LIB_NAME customized_planner)
+
+# find dependencies
+find_package(ompl REQUIRED)
+
+include_directories(include)
+include_directories(/opt/ros/humble/include/ompl-1.6)
+
+add_library(${PLANNER_LIB_NAME} SHARED
+  src/MyRRT.cpp
+  src/MyPRM.cpp
+)
+
+ament_target_dependencies(${PLANNER_LIB_NAME}
+  ompl
+)
+
+```
+
+Here we use "add_library" instead of "add_executable" as we want to implement our planning algorithm as a shared library so that it can be used by other ROS2 packages. We also add dependency which is ompl, this is because our copied algorithms are based on OMPL libraries. To be able to compile successfully, we also need to indicate the include directories for both OMPL and our own .cpp files.
+
+To be able to identified and used by other ROS2 package, we need to do extra configurations in our CMakeLists.txt, see below:
+
+```
+install(
+  TARGETS ${PLANNER_LIB_NAME}
+  EXPORT ${PLANNER_LIB_NAME}Targets
+  LIBRARY DESTINATION lib
+)
+
+install(DIRECTORY include/${PROJECT_NAME}
+  DESTINATION include
+)
+
+ament_export_include_directories(include)
+ament_export_libraries(${PLANNER_LIB_NAME})
+
+```
+
+These lines will indicate the ROS2 buiding system to install the header files and library to the specific destination, and export the destination so that other ROS2 packages can find them.
+
+Now we can compile our planning algorithms in ROS2 package with below command:
+
+```
+$ colcon build --packages-select customized_planner
+
+Starting >>> customized_planner
+Finished <<< customized_planner [0.51s]
+
+Summary: 1 package finished [0.73s]
+
+```
+
+If everything goes well, we can see above outputs.
+
+## 4.2 Interact with MoveIt2
+
+In last section, we create our own ROS2 package and implement our planning algorithms as a shared library so that it can be used by other ROS2 packages. In this section, we will see how the existing MoveIT2 OMPL interface utilizes our customized OMPL planning algorithm.
+
+### 4.2.1 Integrate Algorithm with MoveIt2 OMPL Interface
+
+We already introduced the basic OMPL APIs and how they can be used by MoveIT2 in section [3. Source Code Deep Dive](# Source Code Deep Dive). We know that all the available OMPL algorithms will be registered separately in MoveIt2 ompl interface by "registerPlannerAllocatorHelper".  Now we want MoveIt2 to recognize our customized planning algorithm, what we do is similar. See below the log generated by 'git diff':
+
+```
+--- a/moveit_planners/ompl/ompl_interface/src/planning_context_manager.cpp
++++ b/moveit_planners/ompl/ompl_interface/src/planning_context_manager.cpp
+@@ -66,6 +66,8 @@
+ #include <ompl/geometric/planners/prm/LazyPRMstar.h>
+ #include <ompl/geometric/planners/prm/SPARS.h>
+ #include <ompl/geometric/planners/prm/SPARStwo.h>
++#include <customized_planner/MyRRT.h>
++#include <customized_planner/MyPRM.h>
+
+ #include <ompl/base/ConstrainedSpaceInformation.h>
+ #include <ompl/base/spaces/constraint/ProjectedStateSpace.h>
+@@ -304,6 +306,8 @@ void PlanningContextManager::registerDefaultPlanners()
+   registerPlannerAllocatorHelper<og::SPARStwo>("geometric::SPARStwo");
+   registerPlannerAllocatorHelper<og::STRIDE>("geometric::STRIDE");
+   registerPlannerAllocatorHelper<og::TRRT>("geometric::TRRT");
++  registerPlannerAllocatorHelper<og::MyRRT>("geometric::MyRRT");
++  registerPlannerAllocatorHelper<og::MyPRM>("geometric::MyPRM");
+ }
+```
+
+We can see we first include the necessary header files we exported before, and then we registered our own planning algorithm.
+
+Next, we need to modify the CMakeLists.txt and package.xml to make the compilation work. In CMakeLists.txt, we add below lines:
+
+```
+--- a/moveit_planners/ompl/ompl_interface/CMakeLists.txt
++++ b/moveit_planners/ompl/ompl_interface/CMakeLists.txt
+@@ -31,6 +31,8 @@ if(APPLE)
+   target_link_directories(${MOVEIT_LIB_NAME} PUBLIC ${OMPL_LIBRARY_DIRS})
+ endif()
+
++find_package(customized_planner REQUIRED)
++
+ ament_target_dependencies(${MOVEIT_LIB_NAME}
+   moveit_core
+   moveit_msgs
+@@ -41,12 +43,22 @@ ament_target_dependencies(${MOVEIT_LIB_NAME}
+   tf2_ros
+   OMPL
+   Boost
++  customized_planner
+ )
+
+```
+
+In package.xml, I made below modification so that the building system can build the package "customized_planner" automatically.
+
+```
+--- a/moveit_planners/ompl/package.xml
++++ b/moveit_planners/ompl/package.xml
+@@ -23,6 +23,7 @@
+   <depend>moveit_msgs</depend>
+   <depend>moveit_ros_planning</depend>
+   <depend>ompl</depend>
++  <depend>customized_planner</depend>
+   <depend>rclcpp</depend>
+   <depend>tf2_eigen</depend>
+   <depend>tf2_ros</depend>
+
+```
+
+Now we can re-compile the MoveIt2 and we can see below output if everything goes well:
+
+```
+$ colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release --parallel-workers 4
+Starting >>> moveit_common
+Starting >>> srdfdom
+Starting >>> moveit_resources_panda_description
+Starting >>> launch_param_builder
+Finished <<< moveit_common [0.31s]
+Starting >>> moveit_resources_fanuc_description
+Finished <<< moveit_resources_panda_description [0.31s]
+Starting >>> moveit_resources_panda_moveit_config
+Finished <<< srdfdom [0.44s]
+Starting >>> customized_planner
+Finished <<< moveit_resources_panda_moveit_config [0.15s]
+Finished <<< moveit_resources_fanuc_description [0.16s]
+Starting >>> moveit_task_constructor_msgs
+Starting >>> moveit_resources_fanuc_moveit_config
+Finished <<< moveit_resources_fanuc_moveit_config [0.14s]
+Starting >>> rviz_marker_tools
+--- stderr: launch_param_builder
+/usr/lib/python3/dist-packages/setuptools/command/install.py:34: SetuptoolsDeprecationWarning: setup.py install is deprecated. Use build and pip and other standards-based tools.
+  warnings.warn(
+---
+Finished <<< launch_param_builder [0.68s]
+Starting >>> moveit_configs_utils
+Finished <<< rviz_marker_tools [0.34s]
+Starting >>> moveit_resources_pr2_description
+Finished <<< customized_planner [0.55s]
+Starting >>> moveit_resources_prbt_support
+Finished <<< moveit_resources_pr2_description [0.15s]
+Starting >>> moveit_core
+Finished <<< moveit_resources_prbt_support [0.14s]
+Starting >>> rosparam_shortcuts
+--- stderr: moveit_configs_utils
+/usr/lib/python3/dist-packages/setuptools/command/install.py:34: SetuptoolsDeprecationWarning: setup.py install is deprecated. Use build and pip and other standards-based tools.
+  warnings.warn(
+---
+Finished <<< moveit_configs_utils [0.74s]
+Starting >>> moveit_resources
+Finished <<< rosparam_shortcuts [0.36s]
+Finished <<< moveit_resources [0.17s]
+Finished <<< moveit_core [1.02s]
+Starting >>> moveit_ros_occupancy_map_monitor
+Starting >>> moveit_simple_controller_manager
+Starting >>> moveit_resources_prbt_ikfast_manipulator_plugin
+Finished <<< moveit_task_constructor_msgs [1.75s]
+Starting >>> chomp_motion_planner
+Finished <<< moveit_simple_controller_manager [0.20s]
+Starting >>> moveit_plugins
+Finished <<< moveit_resources_prbt_ikfast_manipulator_plugin [0.22s]
+Starting >>> pilz_industrial_motion_planner_testutils
+Finished <<< moveit_ros_occupancy_map_monitor [0.30s]
+Starting >>> moveit_ros_planning
+Finished <<< chomp_motion_planner [0.25s]
+Starting >>> moveit_chomp_optimizer_adapter
+Finished <<< moveit_plugins [0.15s]
+Starting >>> moveit_planners_chomp
+Finished <<< pilz_industrial_motion_planner_testutils [0.27s]
+Starting >>> moveit_ros_control_interface
+Finished <<< moveit_chomp_optimizer_adapter [0.27s]
+Finished <<< moveit_planners_chomp [0.31s]
+Finished <<< moveit_ros_control_interface [0.28s]
+Finished <<< moveit_ros_planning [0.56s]
+Starting >>> moveit_kinematics
+Starting >>> moveit_ros_warehouse
+Starting >>> moveit_ros_robot_interaction
+Starting >>> moveit_planners_ompl
+Finished <<< moveit_kinematics [0.29s]
+Starting >>> moveit_ros_move_group
+Finished <<< moveit_ros_robot_interaction [0.35s]
+Starting >>> moveit_ros_perception
+Finished <<< moveit_planners_ompl [0.39s]
+Starting >>> moveit_visual_tools
+Finished <<< moveit_ros_warehouse [0.44s]
+Starting >>> moveit_ros_benchmarks
+Finished <<< moveit_ros_perception [0.28s]
+Finished <<< moveit_visual_tools [0.30s]
+Finished <<< moveit_ros_benchmarks [0.29s]
+Finished <<< moveit_ros_move_group [0.44s]
+Starting >>> moveit_ros_planning_interface
+Starting >>> moveit_resources_prbt_moveit_config
+Finished <<< moveit_resources_prbt_moveit_config [0.15s]
+Starting >>> moveit_resources_prbt_pg70_support
+Finished <<< moveit_ros_planning_interface [0.26s]
+Starting >>> moveit_ros_visualization
+Starting >>> moveit_task_constructor_core
+Starting >>> moveit_hybrid_planning
+Finished <<< moveit_resources_prbt_pg70_support [0.18s]
+Starting >>> pilz_industrial_motion_planner
+Finished <<< moveit_hybrid_planning [0.50s]
+Starting >>> moveit_servo
+Finished <<< moveit_task_constructor_core [0.64s]
+Starting >>> moveit_task_constructor_capabilities
+Finished <<< moveit_ros_visualization [0.88s]
+Starting >>> moveit_setup_framework
+Finished <<< moveit_task_constructor_capabilities [0.25s]
+Starting >>> moveit_ros
+Finished <<< pilz_industrial_motion_planner [0.84s]
+Starting >>> moveit_planners
+Finished <<< moveit_ros [0.17s]
+Starting >>> hello_moveit
+Finished <<< moveit_planners [0.17s]
+Starting >>> moveit_task_constructor_visualization
+Finished <<< moveit_servo [0.59s]
+Starting >>> mtc_tutorial
+Finished <<< moveit_setup_framework [0.40s]
+Starting >>> moveit_setup_app_plugins
+Finished <<< hello_moveit [0.26s]
+Starting >>> moveit_setup_controllers
+Finished <<< mtc_tutorial [0.26s]
+Starting >>> moveit_setup_core_plugins
+Finished <<< moveit_task_constructor_visualization [0.58s]
+Starting >>> moveit_setup_srdf_plugins
+Finished <<< moveit_setup_core_plugins [0.39s]
+Starting >>> moveit_task_constructor_demo
+Finished <<< moveit_setup_app_plugins [0.51s]
+Starting >>> moveit_runtime
+Finished <<< moveit_setup_controllers [0.61s]
+Finished <<< moveit_runtime [0.19s]
+Finished <<< moveit_task_constructor_demo [0.38s]
+Finished <<< moveit_setup_srdf_plugins [0.90s]
+Starting >>> moveit_setup_assistant
+Finished <<< moveit_setup_assistant [0.64s]
+Starting >>> moveit
+Finished <<< moveit [0.40s]
+Starting >>> moveit2_tutorials
+Finished <<< moveit2_tutorials [0.55s]
+
+Summary: 58 packages finished [8.38s]
+  2 packages had stderr output: launch_param_builder moveit_configs_utils
+
+```
+
+We can see the building system build the package "customized_planner" as a very early stage.
+
+### 4.2.2 Another way to integrate with MoveIt2
+
+Actually I also tried another method which is to implement a new API named "addCustomPlanner" in "ompl_interface.cpp" and export this API to OMPLPlanningManager. 
+
+```
++++ b/moveit_planners/ompl/ompl_interface/src/ompl_interface.cpp
+@@ -50,12 +50,14 @@ OMPLInterface::OMPLInterface(const moveit::core::RobotModelConstPtr& robot_model
+                              const std::string& parameter_namespace)
+   : node_(node)
+   , parameter_namespace_(parameter_namespace)
+   , robot_model_(robot_model)
+   , constraint_sampler_manager_(std::make_shared<constraint_samplers::ConstraintSamplerManager>())
+   , context_manager_(robot_model, constraint_sampler_manager_)
+   , use_constraints_approximations_(true)
+ {
+   RCLCPP_DEBUG(LOGGER, "Initializing OMPL interface using ROS parameters");
+   loadPlannerConfigurations();
+   loadConstraintSamplers();
+ }
+@@ -113,6 +115,14 @@ OMPLInterface::getPlanningContext(const planning_scene::PlanningSceneConstPtr& p
+   return ctx;
+ }
+
++void
++OMPLInterface::addCustomPlanner(const std::string& planner_id, const ConfiguredPlannerAllocator& pa)
++{
++
++  context_manager_.registerPlannerAllocator(planner_id, pa);
++}
++
+
+diff --git a/moveit_planners/ompl/ompl_interface/src/ompl_planner_manager.cpp b/moveit_planners/ompl/ompl_interface/src/ompl_planner_manager.cpp
+index ba06cf3d4..5b3c09a65 100644
+--- a/moveit_planners/ompl/ompl_interface/src/ompl_planner_manager.cpp
++++ b/moveit_planners/ompl/ompl_interface/src/ompl_planner_manager.cpp
+@@ -35,6 +35,7 @@
+ /* Author: Ioan Sucan, Dave Coleman */
+
+ #include <moveit/ompl_interface/ompl_interface.h>
++#include <moveit/ompl_interface/planning_context_manager.h>
+ #include <moveit/planning_interface/planning_interface.h>
+ #include <moveit/planning_scene/planning_scene.h>
+
+@@ -125,6 +126,17 @@ public:
+     return ompl_interface_->getPlanningContext(planning_scene, req, error_code);
+   }
+
++  void addCustomPlanner(const std::string& planner_id, const ConfiguredPlannerAllocator& pa)
++  {
++       ompl_interface_->addCustomPlanner(planner_id, pa);
++  }
++
++
+
+```
+
+Then we can create the "Planner" lambda function outside the MoveIt2 seperately and pass it into the API we just created, like below:
+
+```
+    planner_instance.addCustomPlanner("geometric::MyRRT", [&](const ob::SpaceInformationPtr& si, const std::string& new_name,
+                                           const ModelBasedPlanningContextSpecification& spec) {
+        ob::PlannerPtr planner;
+        planner = std::make_shared<og::MyRRT>(si);
+
+        if (!new_name.empty())
+        {
+            planner->setName(new_name);
+        }
+
+        planner->params().setParams(spec.config_, true);
+
+        return planner;
+    });
+```
+
+So that MoveIT2 can support any customized OMPL-based planning algorithms as long as they follow the same interface convention. However, I found there are no elegant way to do this, as the application usually use pluginlib to load the OMPL, which means the application only access the "PlanningManager" object instead of "OMPLPlanningManager", our new API is implemented inside the class "OMPLPlanningManager" as it is OMPL-awared. If we instantiate the object "OMPLPlanningManager" directly in application, we need modify the implementation of this class as it is defined in .cpp file and doesn't have a header file to define the class. Therefore, I leave this method here in case I can find an elegant way to do this in future.
+
+
+
+## 4.3 Calling our customized OMPL algorithm
+
+Now we have both our customized planning algorithms and MoveIt2 integration available. In this section, we will write executable MoveIt2 application to call our customized algorithm to do the planning.
