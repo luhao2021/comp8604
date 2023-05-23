@@ -1609,6 +1609,1068 @@ So that MoveIT2 can support any customized OMPL-based planning algorithms as lon
 
 
 
-## 4.3 Calling our customized OMPL algorithm
+## 4.3 Use our customized OMPL algorithm
 
 Now we have both our customized planning algorithms and MoveIt2 integration available. In this section, we will write executable MoveIt2 application to call our customized algorithm to do the planning.
+
+### 4.3.1 Create ROS2 package
+
+We would like to utilize the MoveIt2 existing "move_group" node to handle the planning request. Therefore, we will create our client node first. This is done by commands:
+
+```
+mkdir ~/planner_ws/src -p
+cd ~/planner_ws/src
+ros2 pkg create --build-type ament_cmake --node-name my_node motion_planning_hao
+```
+
+Here we first create a workspace named "planner_ws", and then create a package named "motion_planning_hao" with an executable node "my_node". 
+
+### 4.3.2 Implement "my_node"
+
+Now we implement our "my_node.cpp" mainly based on motion_planning_api in MoveIt2. The main steps are use pluginlib to load object "PlannerManager", and then initialize the "planner_instance"  based on the plugin name we specify. After that, we can use the "planner_instance" to acquire the correct context for solving the planning problem. The source code are shown below:
+
+```
+int main(int argc, char ** argv)
+{
+    rclcpp::init(argc, argv);
+    rclcpp::NodeOptions node_options;
+    node_options.automatically_declare_parameters_from_overrides(true);
+    std::shared_ptr<rclcpp::Node> motion_planning_api_tutorial_node =
+        rclcpp::Node::make_shared("motion_planning_api_tutorial", node_options);
+
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(motion_planning_api_tutorial_node);
+    std::thread([&executor]() { executor.spin(); }).detach();
+
+    const std::string PLANNING_GROUP = "panda_arm";
+    robot_model_loader::RobotModelLoader robot_model_loader(motion_planning_api_tutorial_node, "robot_description");
+    const moveit::core::RobotModelPtr& robot_model = robot_model_loader.getModel();
+    /* Create a RobotState and JointModelGroup to keep track of the current robot pose and planning group*/
+    moveit::core::RobotStatePtr robot_state(new moveit::core::RobotState(robot_model));
+    const moveit::core::JointModelGroup* joint_model_group = robot_state->getJointModelGroup(PLANNING_GROUP);
+
+    planning_scene::PlanningScenePtr planning_scene(new planning_scene::PlanningScene(robot_model));
+    planning_scene->getCurrentStateNonConst().setToDefaultValues(joint_model_group, "ready");
+
+    std::unique_ptr<pluginlib::ClassLoader<planning_interface::PlannerManager>> planner_plugin_loader;
+    planning_interface::PlannerManagerPtr planner_instance;
+    std::string planner_plugin_name;
+    std::string planner_namespace;
+
+    if (!motion_planning_api_tutorial_node->get_parameter("planning_namespace", planner_namespace))
+        RCLCPP_FATAL(LOGGER, "Could not find planner namespace name");
+
+    if (!motion_planning_api_tutorial_node->get_parameter("planning_plugin", planner_plugin_name))
+        RCLCPP_FATAL(LOGGER, "Could not find planner plugin name");
+
+    planner_plugin_loader.reset(new pluginlib::ClassLoader<planning_interface::PlannerManager>(
+                                "moveit_core", "planning_interface::PlannerManager"));
+
+    planner_instance.reset(planner_plugin_loader->createUnmanagedInstance(planner_plugin_name));
+    RCLCPP_INFO(LOGGER, "Hao: namespace: %s", motion_planning_api_tutorial_node->get_namespace());
+    if (!planner_instance->initialize(robot_model, motion_planning_api_tutorial_node,
+                            planner_namespace.c_str()))
+        RCLCPP_FATAL(LOGGER, "Could not initialize planner instance");
+
+    moveit::planning_interface::MoveGroupInterface move_group(motion_planning_api_tutorial_node, PLANNING_GROUP);
+
+    namespace rvt = rviz_visual_tools;
+    moveit_visual_tools::MoveItVisualTools visual_tools(motion_planning_api_tutorial_node, "panda_link0",
+                    "move_group_tutorial", move_group.getRobotModel());
+    visual_tools.enableBatchPublishing();
+    visual_tools.deleteAllMarkers();  // clear all old markers
+    visual_tools.trigger();
+    visual_tools.loadRemoteControl();
+
+    /* RViz provides many types of markers, in this demo we will use text, cylinders, and spheres*/
+    Eigen::Isometry3d text_pose = Eigen::Isometry3d::Identity();
+    text_pose.translation().z() = 1.75;
+    visual_tools.publishText(text_pose, "Motion Planning API Demo", rvt::WHITE, rvt::XLARGE);
+    visual_tools.trigger();
+    visual_tools.prompt("Press 'next' in the RvizVisualToolsGui window to start the demo");
+
+    visual_tools.trigger();
+    planning_interface::MotionPlanRequest req;
+    planning_interface::MotionPlanResponse res;
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header.frame_id = "panda_link0";
+    pose.pose.position.x = 0.3;
+    pose.pose.position.y = 0.4;
+    pose.pose.position.z = 0.75;
+    pose.pose.orientation.w = 1.0;
+
+    std::vector<double> tolerance_pose(3, 0.01);
+    std::vector<double> tolerance_angle(3, 0.01);
+
+    moveit_msgs::msg::Constraints pose_goal =
+            kinematic_constraints::constructGoalConstraints("panda_link8", pose, tolerance_pose, tolerance_angle);
+
+    req.group_name = PLANNING_GROUP;
+    req.goal_constraints.push_back(pose_goal);
+
+    planning_interface::PlanningContextPtr context =
+            planner_instance->getPlanningContext(planning_scene, req, res.error_code_);
+    context->solve(res);
+
+    if (res.error_code_.val != res.error_code_.SUCCESS)
+    {
+        RCLCPP_ERROR(LOGGER, "Could not compute plan successfully");
+        return 0;
+    }
+    // Visualize the result
+    // ^^^^^^^^^^^^^^^^^^^^
+    std::shared_ptr<rclcpp::Publisher<moveit_msgs::msg::DisplayTrajectory>> display_publisher =
+            motion_planning_api_tutorial_node->create_publisher<moveit_msgs::msg::DisplayTrajectory>("/display_planned_path",
+                            1);
+    moveit_msgs::msg::DisplayTrajectory display_trajectory;
+
+    /* Visualize the trajectory */
+    moveit_msgs::msg::MotionPlanResponse response;
+    res.getMessage(response);
+
+    display_trajectory.trajectory_start = response.trajectory_start;
+    display_trajectory.trajectory.push_back(response.trajectory);
+    visual_tools.publishTrajectoryLine(display_trajectory.trajectory.back(), joint_model_group);
+    visual_tools.trigger();
+    display_publisher->publish(display_trajectory);
+
+    /* Set the state in the planning scene to the final state of the last plan */
+    robot_state->setJointGroupPositions(joint_model_group, response.trajectory.joint_trajectory.points.back().positions);
+    planning_scene->setCurrentState(*robot_state.get());
+
+    // Display the goal state
+    visual_tools.publishAxisLabeled(pose.pose, "goal_1");
+    visual_tools.publishText(text_pose, "Pose Goal (1)", rvt::WHITE, rvt::XLARGE);
+    visual_tools.trigger();
+
+    /* We can also use visual_tools to wait for user input */
+    visual_tools.prompt("Press 'next' in the RvizVisualToolsGui window to continue the demo");
+
+    // End
+    planner_instance.reset();
+    rclcpp::shutdown();
+
+    return 0;
+}
+
+```
+
+### 4.3.3 Implement the launch file
+
+The launch file allow us to start up and configure a number of executables containing ROS2 nodes simultaneously. It also provides convinent interface to pass our configurations into the node as parameters. For example, I use below code in my launch file:
+
+```
+def generate_launch_description():
+    robot_description_config = load_file(
+        "moveit_resources_panda_description", "urdf/panda.urdf"
+    )
+    robot_description = {"robot_description": robot_description_config}
+
+    robot_description_semantic_config = load_file(
+        "moveit_resources_panda_moveit_config", "config/panda.srdf"
+    )
+    robot_description_semantic = {
+        "robot_description_semantic": robot_description_semantic_config
+    }
+
+    kinematics_yaml = load_yaml(
+        "moveit_resources_panda_moveit_config", "config/kinematics.yaml"
+    )
+
+    planning_yaml = load_yaml(
+        "moveit_resources_panda_moveit_config", "config/ompl_planning.yaml"
+    )
+
+    planning_plugin = {"planning_plugin": "ompl_interface/OMPLPlanner"}
+
+    planning_namespace = {"planning_namespace": "planning_ns"}
+
+    return LaunchDescription(
+        [
+            Node(
+                package="motion_planning_hao",
+                executable="my_node",
+                name="motion_planning_hao",
+                parameters=[
+                    robot_description,
+                    robot_description_semantic,
+                    kinematics_yaml,
+                    planning_yaml,
+                    planning_plugin,
+                    planning_namespace,
+                ],
+            )
+        ]
+    )
+
+```
+
+We can see that I indicate the ".urdf" and ".srdf" for the robot description, the "ompl_planning.yaml" for the planning configs, and the plugin name, etc.
+
+To be able to make sure we are using the "MyPRM" or "MyRRT" algorithm, we need to indicate it in "ompl_planning.yaml". We first create two configurations for our "MyPRM" and "MyRRT" algorithms, see below:
+
+```
+    MyRRTkConfigDefault:
+      type: geometric::MyRRT
+      range: 0.0  # Max motion added to tree. ==> maxDistance_ default: 0.0, if 0.0, set on setup()
+      goal_bias: 0.05  # When close to goal select goal, with this probability? default: 0.05
+      delay_collision_checking: 1  # Stop collision checking as soon as C-free parent found. default 1
+    MyPRMkConfigDefault:
+      type: geometric::MyPRM
+      max_nearest_neighbors: 10  # use k nearest neighbors. default: 10
+
+```
+
+Then we specify the default planner for group "panda_arm" (which is the group we are using in our my_node.cpp), see below:
+
+```
+  panda_arm:
+    default_planner_config: MyPRMkConfigDefault
+```
+
+### 4.3.4 Implement the CMakeLists.txt
+
+The implementation of CMakeLists.txt is also quite straight-forward, what we do is basically add all the necessary dependencies and install our exexutable and launch files. The main lines are shown below:
+
+```
+find_package(Eigen3 REQUIRED)
+find_package(Boost REQUIRED system filesystem date_time thread)
+find_package(control_msgs REQUIRED)
+find_package(moveit_core REQUIRED)
+find_package(moveit_task_constructor_core REQUIRED)
+find_package(moveit_ros_planning REQUIRED)
+find_package(moveit_ros_planning_interface REQUIRED)
+find_package(moveit_ros_perception REQUIRED)
+find_package(moveit_servo REQUIRED)
+find_package(interactive_markers REQUIRED)
+find_package(rviz_visual_tools REQUIRED)
+find_package(moveit_visual_tools REQUIRED)
+find_package(geometric_shapes REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_eigen REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+
+add_executable(my_node src/my_node.cpp)
+target_include_directories(my_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_compile_features(my_node PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
+
+ament_target_dependencies(my_node
+  ament_cmake
+  rclcpp
+  rclcpp_action
+  tf2_geometry_msgs
+  tf2_ros
+  moveit_core
+  rviz_visual_tools
+  moveit_visual_tools
+  moveit_ros_planning_interface
+  interactive_markers
+  tf2_geometry_msgs
+  moveit_ros_planning
+  pluginlib
+  Eigen3
+  Boost
+  control_msgs
+  moveit_servo
+  moveit_task_constructor_core
+)
+
+install(TARGETS my_node
+  DESTINATION lib/${PROJECT_NAME})
+
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
+```
+
+Now we have everything ready, the package directory structure is:
+
+```
+$ tree src/motion_planning_hao/
+src/motion_planning_hao/
+├── CMakeLists.txt
+├── include
+│   └── motion_planning_hao
+├── launch
+│   └── motion_planning_hao.launch.py
+├── package.xml
+└── src
+    └── my_node.cpp
+
+4 directories, 4 files
+```
+
+we can simply compile the package:
+
+```
+$ colcon build --packages-select motion_planning_hao
+Starting >>> motion_planning_hao
+Finished <<< motion_planning_hao [14.7s]
+
+Summary: 1 package finished [14.9s]
+```
+
+The above output will be shown if everything goes well, and we can also check the executable "my_node" and our "motion_planning_hao.launch.py" are installed correctly.
+
+### 4.3.5 Run the demo
+
+To run the demo, we first open one terminal and run below:
+
+```
+ros2 launch moveit2_tutorials move_group.launch.py
+```
+
+This is to start the "move_group" server node and launch the Rviz visual tool. We can see below logs from above command:
+
+```
+$ ros2 launch moveit2_tutorials move_group.launch.py
+[INFO] [launch]: All log files can be found below /home/hao/.ros/log/2023-05-23-09-24-02-167967-hao-XPS-17-9710-1076376
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [rviz2-1]: process started with pid [1076377]
+[INFO] [static_transform_publisher-2]: process started with pid [1076379]
+[INFO] [robot_state_publisher-3]: process started with pid [1076381]
+[INFO] [move_group-4]: process started with pid [1076383]
+[INFO] [ros2_control_node-5]: process started with pid [1076385]
+[INFO] [ros2 run controller_manager spawner panda_arm_controller-6]: process started with pid [1076387]
+[INFO] [ros2 run controller_manager spawner panda_hand_controller-7]: process started with pid [1076389]
+[INFO] [ros2 run controller_manager spawner joint_state_broadcaster-8]: process started with pid [1076391]
+[static_transform_publisher-2] [WARN] [1684805042.484657800] []: Old-style arguments are deprecated; see --help for new-style arguments
+[static_transform_publisher-2] [INFO] [1684805042.491373640] [static_transform_publisher]: Spinning until stopped - publishing transform
+[static_transform_publisher-2] translation: ('0.000000', '0.000000', '0.000000')
+[static_transform_publisher-2] rotation: ('0.000000', '0.000000', '0.000000', '1.000000')
+[static_transform_publisher-2] from 'world' to 'panda_link0'
+[ros2_control_node-5] [INFO] [1684805042.510823277] [resource_manager]: Loading hardware 'PandaFakeSystem' 
+[ros2_control_node-5] [INFO] [1684805042.511272507] [resource_manager]: Initialize hardware 'PandaFakeSystem' 
+[ros2_control_node-5] [WARN] [1684805042.511296053] [mock_generic_system]: Parsing of optional initial interface values failed or uses a deprecated format. Add initial values for every state interface in the ros2_control.xacro. For example: 
+[ros2_control_node-5] <state_interface name="velocity"> 
+[ros2_control_node-5]   <param name="initial_value">0.0</param> 
+[ros2_control_node-5] </state_interface>
+[ros2_control_node-5] [INFO] [1684805042.511303038] [resource_manager]: Successful initialization of hardware 'PandaFakeSystem'
+[ros2_control_node-5] [INFO] [1684805042.511315689] [resource_manager]: Loading hardware 'PandaHandFakeSystem' 
+[ros2_control_node-5] [INFO] [1684805042.511321429] [resource_manager]: Initialize hardware 'PandaHandFakeSystem' 
+[ros2_control_node-5] [INFO] [1684805042.511327215] [resource_manager]: Successful initialization of hardware 'PandaHandFakeSystem'
+[ros2_control_node-5] [INFO] [1684805042.511350547] [resource_manager]: 'configure' hardware 'PandaFakeSystem' 
+[ros2_control_node-5] [INFO] [1684805042.511355612] [resource_manager]: Successful 'configure' of hardware 'PandaFakeSystem'
+[ros2_control_node-5] [INFO] [1684805042.511362675] [resource_manager]: 'activate' hardware 'PandaFakeSystem' 
+[ros2_control_node-5] [INFO] [1684805042.511367355] [resource_manager]: Successful 'activate' of hardware 'PandaFakeSystem'
+[ros2_control_node-5] [INFO] [1684805042.511369954] [resource_manager]: 'configure' hardware 'PandaHandFakeSystem' 
+[ros2_control_node-5] [INFO] [1684805042.511372002] [resource_manager]: Successful 'configure' of hardware 'PandaHandFakeSystem'
+[ros2_control_node-5] [INFO] [1684805042.511374482] [resource_manager]: 'activate' hardware 'PandaHandFakeSystem' 
+[ros2_control_node-5] [INFO] [1684805042.511376633] [resource_manager]: Successful 'activate' of hardware 'PandaHandFakeSystem'
+[ros2_control_node-5] [INFO] [1684805042.513531670] [controller_manager]: update rate is 100 Hz
+[ros2_control_node-5] [INFO] [1684805042.513685097] [controller_manager]: RT kernel is recommended for better performance
+[robot_state_publisher-3] [INFO] [1684805042.534076248] [robot_state_publisher]: got segment panda_hand
+[robot_state_publisher-3] [INFO] [1684805042.534167068] [robot_state_publisher]: got segment panda_leftfinger
+[robot_state_publisher-3] [INFO] [1684805042.534172396] [robot_state_publisher]: got segment panda_link0
+[robot_state_publisher-3] [INFO] [1684805042.534175853] [robot_state_publisher]: got segment panda_link1
+[robot_state_publisher-3] [INFO] [1684805042.534178919] [robot_state_publisher]: got segment panda_link2
+[robot_state_publisher-3] [INFO] [1684805042.534181918] [robot_state_publisher]: got segment panda_link3
+[robot_state_publisher-3] [INFO] [1684805042.534184916] [robot_state_publisher]: got segment panda_link4
+[robot_state_publisher-3] [INFO] [1684805042.534187797] [robot_state_publisher]: got segment panda_link5
+[robot_state_publisher-3] [INFO] [1684805042.534190604] [robot_state_publisher]: got segment panda_link6
+[robot_state_publisher-3] [INFO] [1684805042.534193422] [robot_state_publisher]: got segment panda_link7
+[robot_state_publisher-3] [INFO] [1684805042.534196245] [robot_state_publisher]: got segment panda_link8
+[robot_state_publisher-3] [INFO] [1684805042.534199093] [robot_state_publisher]: got segment panda_rightfinger
+[move_group-4] [INFO] [1684805042.544223450] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.0275406 seconds
+[move_group-4] [INFO] [1684805042.544281836] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[move_group-4] [INFO] [1684805042.570269507] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Publishing maintained planning scene on 'monitored_planning_scene'
+[move_group-4] [INFO] [1684805042.570380946] [moveit.ros_planning_interface.moveit_cpp]: Listening to 'joint_states' for joint states
+[move_group-4] [INFO] [1684805042.571117316] [moveit_ros.current_state_monitor]: Listening to joint states on topic 'joint_states'
+[move_group-4] [INFO] [1684805042.571357136] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to '/attached_collision_object' for attached collision objects
+[move_group-4] [INFO] [1684805042.571370061] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Starting planning scene monitor
+[move_group-4] [INFO] [1684805042.571540714] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to '/planning_scene'
+[move_group-4] [INFO] [1684805042.571550547] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Starting world geometry update monitor for collision objects, attached objects, octomap updates.
+[move_group-4] [INFO] [1684805042.571701128] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to 'collision_object'
+[move_group-4] [INFO] [1684805042.571847098] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to 'planning_scene_world' for planning scene world geometry
+[move_group-4] [WARN] [1684805042.572397126] [moveit.ros.occupancy_map_monitor.middleware_handle]: Resolution not specified for Octomap. Assuming resolution = 0.1 instead
+[move_group-4] [ERROR] [1684805042.572413407] [moveit.ros.occupancy_map_monitor.middleware_handle]: No 3D sensor plugin(s) defined for octomap updates
+[move_group-4] [INFO] [1684805042.573051715] [moveit.ros_planning_interface.moveit_cpp]: Loading planning pipeline 'trajopt'
+[move_group-4] [ERROR] [1684805042.574916852] [moveit.ros_planning.planning_pipeline]: Exception while loading planner 'trajopt_interface/TrajOptPlanner': According to the loaded plugin descriptions the class trajopt_interface/TrajOptPlanner with base class type planning_interface::PlannerManager does not exist. Declared types are  chomp_interface/CHOMPPlanner ompl_interface/OMPLPlanner pilz_industrial_motion_planner/CommandPlannerAvailable plugins: chomp_interface/CHOMPPlanner, ompl_interface/OMPLPlanner, pilz_industrial_motion_planner/CommandPlanner
+[move_group-4] [INFO] [1684805042.577671937] [moveit_ros.add_time_optimal_parameterization]: Param 'trajopt.path_tolerance' was not set. Using default value: 0.100000
+[move_group-4] [INFO] [1684805042.577687326] [moveit_ros.add_time_optimal_parameterization]: Param 'trajopt.resample_dt' was not set. Using default value: 0.100000
+[move_group-4] [INFO] [1684805042.577690452] [moveit_ros.add_time_optimal_parameterization]: Param 'trajopt.min_angle_change' was not set. Using default value: 0.001000
+[move_group-4] [INFO] [1684805042.577706739] [moveit_ros.fix_workspace_bounds]: Param 'trajopt.default_workspace_bounds' was not set. Using default value: 10.000000
+[move_group-4] [INFO] [1684805042.577715778] [moveit_ros.fix_start_state_bounds]: Param 'trajopt.start_state_max_bounds_error' was set to 0.100000
+[move_group-4] [INFO] [1684805042.577718973] [moveit_ros.fix_start_state_bounds]: Param 'trajopt.start_state_max_dt' was not set. Using default value: 0.500000
+[move_group-4] [INFO] [1684805042.577725720] [moveit_ros.fix_start_state_collision]: Param 'trajopt.start_state_max_dt' was not set. Using default value: 0.500000
+[move_group-4] [INFO] [1684805042.577728767] [moveit_ros.fix_start_state_collision]: Param 'trajopt.jiggle_fraction' was not set. Using default value: 0.020000
+[move_group-4] [INFO] [1684805042.577736920] [moveit_ros.fix_start_state_collision]: Param 'trajopt.max_sampling_attempts' was not set. Using default value: 100
+[move_group-4] [INFO] [1684805042.577743314] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Add Time Optimal Parameterization'
+[move_group-4] [INFO] [1684805042.577746786] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Workspace Bounds'
+[move_group-4] [INFO] [1684805042.577748810] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State Bounds'
+[move_group-4] [INFO] [1684805042.577771671] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State In Collision'
+[move_group-4] [INFO] [1684805042.577773810] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State Path Constraints'
+[move_group-4] [ERROR] [1684805042.579991619] [moveit.ros_planning_interface.moveit_cpp]: Failed to initialize planning pipeline 'trajopt'.
+[move_group-4] [INFO] [1684805042.580419295] [moveit.ros_planning_interface.moveit_cpp]: Loading planning pipeline 'ompl'
+[move_group-4] [INFO] [1684805042.582384106] [moveit.ros_planning.planning_pipeline]: Multiple planning plugins available. You should specify the '~planning_plugin' parameter. Using 'chomp_interface/CHOMPPlanner' for now.
+[move_group-4] [INFO] [1684805042.584536929] [moveit.ros_planning.planning_pipeline]: Using planning interface 'CHOMP'
+[move_group-4] [INFO] [1684805042.584912119] [moveit.ros_planning_interface.moveit_cpp]: Loading planning pipeline 'chomp'
+[move_group-4] [INFO] [1684805042.587397395] [moveit.ros_planning.planning_pipeline]: Using planning interface 'CHOMP'
+[move_group-4] [INFO] [1684805042.589282617] [moveit_ros.add_time_optimal_parameterization]: Param 'chomp.path_tolerance' was not set. Using default value: 0.100000
+[move_group-4] [INFO] [1684805042.589292537] [moveit_ros.add_time_optimal_parameterization]: Param 'chomp.resample_dt' was not set. Using default value: 0.100000
+[move_group-4] [INFO] [1684805042.589295759] [moveit_ros.add_time_optimal_parameterization]: Param 'chomp.min_angle_change' was not set. Using default value: 0.001000
+[move_group-4] [INFO] [1684805042.589308843] [moveit_ros.fix_workspace_bounds]: Param 'chomp.default_workspace_bounds' was not set. Using default value: 10.000000
+[move_group-4] [INFO] [1684805042.589321452] [moveit_ros.fix_start_state_bounds]: Param 'chomp.start_state_max_bounds_error' was set to 0.100000
+[move_group-4] [INFO] [1684805042.589325811] [moveit_ros.fix_start_state_bounds]: Param 'chomp.start_state_max_dt' was not set. Using default value: 0.500000
+[move_group-4] [INFO] [1684805042.589336850] [moveit_ros.fix_start_state_collision]: Param 'chomp.start_state_max_dt' was not set. Using default value: 0.500000
+[move_group-4] [INFO] [1684805042.589341525] [moveit_ros.fix_start_state_collision]: Param 'chomp.jiggle_fraction' was not set. Using default value: 0.020000
+[move_group-4] [INFO] [1684805042.589346056] [moveit_ros.fix_start_state_collision]: Param 'chomp.max_sampling_attempts' was not set. Using default value: 100
+[move_group-4] [INFO] [1684805042.589357588] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Add Time Optimal Parameterization'
+[move_group-4] [INFO] [1684805042.589360555] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Workspace Bounds'
+[move_group-4] [INFO] [1684805042.589362484] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State Bounds'
+[move_group-4] [INFO] [1684805042.589365119] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State In Collision'
+[move_group-4] [INFO] [1684805042.589368004] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State Path Constraints'
+[move_group-4] [INFO] [1684805042.589688855] [moveit.ros_planning_interface.moveit_cpp]: Loading planning pipeline 'pilz_industrial_motion_planner'
+[move_group-4] [INFO] [1684805042.592088113] [moveit.pilz_industrial_motion_planner.joint_limits_aggregator]: Reading limits from namespace robot_description_planning
+[move_group-4] [WARN] [1684805042.592487766] [moveit.pilz_industrial_motion_planner.joint_limits_aggregator]: Multi-DOF-Joint 'virtual_joint' not supported.
+[move_group-4] [WARN] [1684805042.592510914] [moveit.pilz_industrial_motion_planner.joint_limits_aggregator]: Multi-DOF-Joint 'virtual_joint' not supported.
+[move_group-4] [INFO] [1684805042.595340540] [moveit.pilz_industrial_motion_planner]: Available plugins: pilz_industrial_motion_planner/PlanningContextLoaderCIRC pilz_industrial_motion_planner/PlanningContextLoaderLIN pilz_industrial_motion_planner/PlanningContextLoaderPTP 
+[move_group-4] [INFO] [1684805042.595350790] [moveit.pilz_industrial_motion_planner]: About to load: pilz_industrial_motion_planner/PlanningContextLoaderCIRC
+[move_group-4] [INFO] [1684805042.596246558] [moveit.pilz_industrial_motion_planner]: Registered Algorithm [CIRC]
+[move_group-4] [INFO] [1684805042.596255296] [moveit.pilz_industrial_motion_planner]: About to load: pilz_industrial_motion_planner/PlanningContextLoaderLIN
+[move_group-4] [INFO] [1684805042.596771543] [moveit.pilz_industrial_motion_planner]: Registered Algorithm [LIN]
+[move_group-4] [INFO] [1684805042.596778805] [moveit.pilz_industrial_motion_planner]: About to load: pilz_industrial_motion_planner/PlanningContextLoaderPTP
+[move_group-4] [INFO] [1684805042.597239372] [moveit.pilz_industrial_motion_planner]: Registered Algorithm [PTP]
+[move_group-4] [INFO] [1684805042.597255890] [moveit.ros_planning.planning_pipeline]: Using planning interface 'Pilz Industrial Motion Planner'
+[move_group-4] [INFO] [1684805042.599198620] [moveit_ros.fix_workspace_bounds]: Param 'pilz_industrial_motion_planner.default_workspace_bounds' was not set. Using default value: 10.000000
+[move_group-4] [INFO] [1684805042.599213516] [moveit_ros.fix_start_state_bounds]: Param 'pilz_industrial_motion_planner.start_state_max_bounds_error' was not set. Using default value: 0.050000
+[move_group-4] [INFO] [1684805042.599216699] [moveit_ros.fix_start_state_bounds]: Param 'pilz_industrial_motion_planner.start_state_max_dt' was not set. Using default value: 0.500000
+[move_group-4] [INFO] [1684805042.599224475] [moveit_ros.fix_start_state_collision]: Param 'pilz_industrial_motion_planner.start_state_max_dt' was not set. Using default value: 0.500000
+[move_group-4] [INFO] [1684805042.599227299] [moveit_ros.fix_start_state_collision]: Param 'pilz_industrial_motion_planner.jiggle_fraction' was not set. Using default value: 0.020000
+[move_group-4] [INFO] [1684805042.599230458] [moveit_ros.fix_start_state_collision]: Param 'pilz_industrial_motion_planner.max_sampling_attempts' was not set. Using default value: 100
+[move_group-4] [INFO] [1684805042.599237515] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Workspace Bounds'
+[move_group-4] [INFO] [1684805042.599239985] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State Bounds'
+[move_group-4] [INFO] [1684805042.599241651] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State In Collision'
+[move_group-4] [INFO] [1684805042.599243528] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State Path Constraints'
+[move_group-4] [INFO] [1684805042.599673412] [moveit.ros_planning_interface.moveit_cpp]: Loading planning pipeline 'lerp'
+[move_group-4] [ERROR] [1684805042.602411562] [moveit.ros_planning.planning_pipeline]: Exception while loading planner 'lerp_interface/LERPPlanner': According to the loaded plugin descriptions the class lerp_interface/LERPPlanner with base class type planning_interface::PlannerManager does not exist. Declared types are  chomp_interface/CHOMPPlanner ompl_interface/OMPLPlanner pilz_industrial_motion_planner/CommandPlannerAvailable plugins: chomp_interface/CHOMPPlanner, ompl_interface/OMPLPlanner, pilz_industrial_motion_planner/CommandPlanner
+[move_group-4] [INFO] [1684805042.604763977] [moveit_ros.add_time_optimal_parameterization]: Param 'lerp.path_tolerance' was not set. Using default value: 0.100000
+[move_group-4] [INFO] [1684805042.604773031] [moveit_ros.add_time_optimal_parameterization]: Param 'lerp.resample_dt' was not set. Using default value: 0.100000
+[move_group-4] [INFO] [1684805042.604775871] [moveit_ros.add_time_optimal_parameterization]: Param 'lerp.min_angle_change' was not set. Using default value: 0.001000
+[move_group-4] [INFO] [1684805042.604784771] [moveit_ros.fix_workspace_bounds]: Param 'lerp.default_workspace_bounds' was not set. Using default value: 10.000000
+[move_group-4] [INFO] [1684805042.604794080] [moveit_ros.fix_start_state_bounds]: Param 'lerp.start_state_max_bounds_error' was set to 0.100000
+[move_group-4] [INFO] [1684805042.604797697] [moveit_ros.fix_start_state_bounds]: Param 'lerp.start_state_max_dt' was not set. Using default value: 0.500000
+[move_group-4] [INFO] [1684805042.604805485] [moveit_ros.fix_start_state_collision]: Param 'lerp.start_state_max_dt' was not set. Using default value: 0.500000
+[move_group-4] [INFO] [1684805042.604808213] [moveit_ros.fix_start_state_collision]: Param 'lerp.jiggle_fraction' was not set. Using default value: 0.020000
+[move_group-4] [INFO] [1684805042.604811264] [moveit_ros.fix_start_state_collision]: Param 'lerp.max_sampling_attempts' was not set. Using default value: 100
+[move_group-4] [INFO] [1684805042.604818415] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Add Time Optimal Parameterization'
+[move_group-4] [INFO] [1684805042.604830398] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Workspace Bounds'
+[move_group-4] [INFO] [1684805042.604832498] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State Bounds'
+[move_group-4] [INFO] [1684805042.604834158] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State In Collision'
+[move_group-4] [INFO] [1684805042.604836235] [moveit.ros_planning.planning_pipeline]: Using planning request adapter 'Fix Start State Path Constraints'
+[move_group-4] [ERROR] [1684805042.605173987] [moveit.ros_planning_interface.moveit_cpp]: Failed to initialize planning pipeline 'lerp'.
+[move_group-4] [INFO] [1684805042.635716023] [moveit.plugins.moveit_simple_controller_manager]: Added FollowJointTrajectory controller for panda_arm_controller
+[move_group-4] [INFO] [1684805042.635765022] [moveit.plugins.moveit_simple_controller_manager]: Max effort set to 0.0
+[move_group-4] [INFO] [1684805042.636598345] [moveit.plugins.moveit_simple_controller_manager]: Added GripperCommand controller for panda_hand_controller
+[move_group-4] [INFO] [1684805042.636709976] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-4] [INFO] [1684805042.636732098] [moveit.plugins.moveit_simple_controller_manager]: Returned 2 controllers in list
+[move_group-4] [INFO] [1684805042.637016997] [moveit_ros.trajectory_execution_manager]: Trajectory execution is managing controllers
+[move_group-4] [INFO] [1684805042.637028265] [move_group.move_group]: MoveGroup debug mode is ON
+[move_group-4] [INFO] [1684805042.645616897] [move_group.move_group]: 
+[move_group-4] 
+[move_group-4] ********************************************************
+[move_group-4] * MoveGroup using: 
+[move_group-4] *     - ApplyPlanningSceneService
+[move_group-4] *     - ClearOctomapService
+[move_group-4] *     - CartesianPathService
+[move_group-4] *     - ExecuteTrajectoryAction
+[move_group-4] *     - GetPlanningSceneService
+[move_group-4] *     - KinematicsService
+[move_group-4] *     - MoveAction
+[move_group-4] *     - MotionPlanService
+[move_group-4] *     - QueryPlannersService
+[move_group-4] *     - StateValidationService
+[move_group-4] ********************************************************
+[move_group-4] 
+[move_group-4] [INFO] [1684805042.645663172] [moveit_move_group_capabilities_base.move_group_context]: MoveGroup context using planning plugin chomp_interface/CHOMPPlanner
+[move_group-4] [INFO] [1684805042.645669725] [moveit_move_group_capabilities_base.move_group_context]: MoveGroup context initialization complete
+[move_group-4] Loading 'move_group/ApplyPlanningSceneService'...
+[move_group-4] Loading 'move_group/ClearOctomapService'...
+[move_group-4] Loading 'move_group/MoveGroupCartesianPathService'...
+[move_group-4] Loading 'move_group/MoveGroupExecuteTrajectoryAction'...
+[move_group-4] Loading 'move_group/MoveGroupGetPlanningSceneService'...
+[move_group-4] Loading 'move_group/MoveGroupKinematicsService'...
+[move_group-4] Loading 'move_group/MoveGroupMoveAction'...
+[move_group-4] Loading 'move_group/MoveGroupPlanService'...
+[move_group-4] Loading 'move_group/MoveGroupQueryPlannersService'...
+[move_group-4] Loading 'move_group/MoveGroupStateValidationService'...
+[move_group-4] 
+[move_group-4] You can start planning now!
+[move_group-4] 
+[rviz2-1] [INFO] [1684805042.719534248] [rviz2]: Stereo is NOT SUPPORTED
+[rviz2-1] [INFO] [1684805042.720579829] [rviz2]: OpenGl version: 4.6 (GLSL 4.6)
+[rviz2-1] [INFO] [1684805042.772721543] [rviz2]: Stereo is NOT SUPPORTED
+[rviz2-1] Warning: class_loader.impl: SEVERE WARNING!!! A namespace collision has occurred with plugin factory for class rviz_default_plugins::displays::InteractiveMarkerDisplay. New factory will OVERWRITE existing one. This situation occurs when libraries containing plugins are directly linked against an executable (the one running right now generating this message). Please separate plugins out into their own library or just don't link against the library and use either class_loader::ClassLoader/MultiLibraryClassLoader to open.
+[rviz2-1]          at line 253 in /opt/ros/humble/include/class_loader/class_loader/class_loader_core.hpp
+[ros2_control_node-5] [INFO] [1684805042.902125137] [controller_manager]: Loading controller 'panda_arm_controller'
+[ros2 run controller_manager spawner panda_arm_controller-6] [INFO] [1684805042.923451120] [spawner_panda_arm_controller]: Loaded panda_arm_controller
+[ros2_control_node-5] [INFO] [1684805042.924295611] [controller_manager]: Configuring controller 'panda_arm_controller'
+[ros2_control_node-5] [INFO] [1684805042.924413906] [panda_arm_controller]: No specific joint names are used for command interfaces. Using 'joints' parameter.
+[ros2_control_node-5] [INFO] [1684805042.924440680] [panda_arm_controller]: Command interfaces are [position] and state interfaces are [position velocity].
+[ros2_control_node-5] [INFO] [1684805042.924455157] [panda_arm_controller]: Using 'splines' interpolation method.
+[rviz2-1] [INFO] [1684805042.924679514] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.0212833 seconds
+[rviz2-1] [INFO] [1684805042.924716353] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[ros2_control_node-5] [INFO] [1684805042.925320663] [panda_arm_controller]: Controller state will be published at 50.00 Hz.
+[ros2_control_node-5] [INFO] [1684805042.926750047] [panda_arm_controller]: Action status changes will be monitored at 20.00 Hz.
+[ros2 run controller_manager spawner panda_arm_controller-6] [INFO] [1684805042.944378204] [spawner_panda_arm_controller]: Configured and activated panda_arm_controller
+[ros2_control_node-5] [INFO] [1684805043.066471077] [controller_manager]: Loading controller 'joint_state_broadcaster'
+[ros2 run controller_manager spawner joint_state_broadcaster-8] [INFO] [1684805043.074447279] [spawner_joint_state_broadcaster]: Loaded joint_state_broadcaster
+[ros2_control_node-5] [INFO] [1684805043.075047442] [controller_manager]: Configuring controller 'joint_state_broadcaster'
+[ros2_control_node-5] [INFO] [1684805043.075103874] [joint_state_broadcaster]: 'joints' or 'interfaces' parameter is empty. All available state interfaces will be published
+[INFO] [ros2 run controller_manager spawner panda_arm_controller-6]: process has finished cleanly [pid 1076387]
+[ros2 run controller_manager spawner joint_state_broadcaster-8] [INFO] [1684805043.094634182] [spawner_joint_state_broadcaster]: Configured and activated joint_state_broadcaster
+[ros2_control_node-5] [INFO] [1684805043.096138089] [controller_manager]: Loading controller 'panda_hand_controller'
+[ros2 run controller_manager spawner panda_hand_controller-7] [INFO] [1684805043.104760042] [spawner_panda_hand_controller]: Loaded panda_hand_controller
+[ros2_control_node-5] [INFO] [1684805043.105572091] [controller_manager]: Configuring controller 'panda_hand_controller'
+[ros2_control_node-5] [INFO] [1684805043.105634383] [panda_hand_controller]: Action status changes will be monitored at 20Hz.
+[ros2 run controller_manager spawner panda_hand_controller-7] [INFO] [1684805043.124654075] [spawner_panda_hand_controller]: Configured and activated panda_hand_controller
+[INFO] [ros2 run controller_manager spawner joint_state_broadcaster-8]: process has finished cleanly [pid 1076391]
+[INFO] [ros2 run controller_manager spawner panda_hand_controller-7]: process has finished cleanly [pid 1076389]
+[rviz2-1] [ERROR] [1684805046.109996071] [moveit_ros_visualization.motion_planning_frame]: Action server: /recognize_objects not available
+[rviz2-1] [INFO] [1684805046.119438013] [moveit_ros_visualization.motion_planning_frame]: MoveGroup namespace changed: / -> . Reloading params.
+[rviz2-1] [WARN] [1684805046.131667010] [rcl.logging_rosout]: Publisher already registered for provided node name. If this is due to multiple nodes with the same name then all logs for that logger name will go out over the existing publisher. As soon as any node with that name is destructed it will unregister the publisher, preventing any further logs for that name from being published on the rosout topic.
+[rviz2-1] [INFO] [1684805046.164861456] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.00157507 seconds
+[rviz2-1] [INFO] [1684805046.164886756] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[rviz2-1] [INFO] [1684805046.190123904] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Starting planning scene monitor
+[rviz2-1] [INFO] [1684805046.190668896] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to '/monitored_planning_scene'
+[rviz2-1] [INFO] [1684805046.192350488] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Starting planning scene monitor
+[rviz2-1] [INFO] [1684805046.193090418] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Listening to '/monitored_planning_scene'
+[rviz2-1] [INFO] [1684805046.197879175] [interactive_marker_display_94302540147984]: Connected on namespace: /rviz_moveit_motion_planning_display/robot_interaction_interactive_marker_topic
+[rviz2-1] [INFO] [1684805046.202894609] [moveit_ros_visualization.motion_planning_frame]: group panda_arm
+[rviz2-1] [INFO] [1684805046.202921735] [moveit_ros_visualization.motion_planning_frame]: Constructing new MoveGroup connection for group 'panda_arm' in namespace ''
+[rviz2-1] [INFO] [1684805046.208852438] [move_group_interface]: Ready to take commands for planning group panda_arm.
+[rviz2-1] [INFO] [1684805046.224357510] [interactive_marker_display_94302540147984]: Sending request for interactive markers
+[rviz2-1] [INFO] [1684805046.254426130] [interactive_marker_display_94302540147984]: Service response received for initialization
+
+```
+
+Now we open another terminal, and run below command to launch our own node:
+
+```
+ros2 launch motion_planning_hao motion_planning_hao.launch.py
+```
+
+below logs are printed:
+
+```
+$ ros2 launch motion_planning_hao motion_planning_hao.launch.py
+[INFO] [launch]: All log files can be found below /home/hao/.ros/log/2023-05-23-09-24-12-362616-hao-XPS-17-9710-1076628
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [my_node-1]: process started with pid [1076629]
+[my_node-1] [INFO] [1684805052.891984799] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.0268928 seconds
+[my_node-1] [INFO] [1684805052.892034231] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[my_node-1] [INFO] [1684805052.918314476] [my_planner]: Hao: namespace: /
+[my_node-1] [INFO] [1684805052.918379429] [moveit.ompl_planning.ompl_interface]: Hao: Node name:motion_planning_hao, namespace:/
+[my_node-1] [INFO] [1684805052.918386303] [moveit.ompl_planning.ompl_interface]: Hao: group_name_param: planning_ns.hand
+[my_node-1] [INFO] [1684805052.918391475] [moveit.ompl_planning.ompl_interface]: Hao: acquiring default planner config: planning_ns.hand.default_planner_config.
+[my_node-1] [INFO] [1684805052.918398207] [moveit.ompl_planning.ompl_interface]: Hao: load planner failed, use RRTConnect! Group name: hand.
+[my_node-1] [INFO] [1684805052.918407394] [moveit.ompl_planning.ompl_interface]: Hao: acquiring planner config: planning_ns.hand.planner_configs.
+[my_node-1] [INFO] [1684805052.918428413] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: SBLkConfigDefault
+[my_node-1] [INFO] [1684805052.918486245] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: ESTkConfigDefault
+[my_node-1] [INFO] [1684805052.918511023] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LBKPIECEkConfigDefault
+[my_node-1] [INFO] [1684805052.918535492] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BKPIECEkConfigDefault
+[my_node-1] [INFO] [1684805052.918559565] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: KPIECEkConfigDefault
+[my_node-1] [INFO] [1684805052.918585186] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: RRTkConfigDefault
+[my_node-1] [INFO] [1684805052.918604923] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: RRTConnectkConfigDefault
+[my_node-1] [INFO] [1684805052.918620642] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: RRTstarkConfigDefault
+[my_node-1] [INFO] [1684805052.918638388] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: TRRTkConfigDefault
+[my_node-1] [INFO] [1684805052.918659667] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: PRMkConfigDefault
+[my_node-1] [INFO] [1684805052.918680453] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: PRMstarkConfigDefault
+[my_node-1] [INFO] [1684805052.918694533] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: FMTkConfigDefault
+[my_node-1] [INFO] [1684805052.918711502] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BFMTkConfigDefault
+[my_node-1] [INFO] [1684805052.918744309] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: PDSTkConfigDefault
+[my_node-1] [INFO] [1684805052.918758800] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: STRIDEkConfigDefault
+[my_node-1] [INFO] [1684805052.918778621] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BiTRRTkConfigDefault
+[my_node-1] [INFO] [1684805052.918808472] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LBTRRTkConfigDefault
+[my_node-1] [INFO] [1684805052.918824762] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BiESTkConfigDefault
+[my_node-1] [INFO] [1684805052.918844689] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: ProjESTkConfigDefault
+[my_node-1] [INFO] [1684805052.918861274] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LazyPRMkConfigDefault
+[my_node-1] [INFO] [1684805052.918875186] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LazyPRMstarkConfigDefault
+[my_node-1] [INFO] [1684805052.918890279] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: SPARSkConfigDefault
+[my_node-1] [INFO] [1684805052.918906734] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: SPARStwokConfigDefault
+[my_node-1] [INFO] [1684805052.918924121] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: TrajOptDefault
+[my_node-1] [INFO] [1684805052.918939703] [moveit.ompl_planning.ompl_interface]: Hao: group_name_param: planning_ns.panda_arm
+[my_node-1] [INFO] [1684805052.918942056] [moveit.ompl_planning.ompl_interface]: Hao: acquiring default planner config: planning_ns.panda_arm.default_planner_config.
+[my_node-1] [INFO] [1684805052.918945618] [moveit.ompl_planning.ompl_interface]: Hao: acquiring planner config success: MyPRMkConfigDefault
+[my_node-1] [INFO] [1684805052.918960490] [moveit.ompl_planning.ompl_interface]: Hao: acquiring planner config: planning_ns.panda_arm.planner_configs.
+[my_node-1] [INFO] [1684805052.918983627] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: MyPRMkConfigDefault
+[my_node-1] [INFO] [1684805052.918998085] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: MyRRTkConfigDefault
+[my_node-1] [INFO] [1684805052.919013707] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: ESTkConfigDefault
+[my_node-1] [INFO] [1684805052.919029976] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: SBLkConfigDefault
+[my_node-1] [INFO] [1684805052.919044421] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: ESTkConfigDefault
+[my_node-1] [INFO] [1684805052.919058954] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LBKPIECEkConfigDefault
+[my_node-1] [INFO] [1684805052.919074601] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BKPIECEkConfigDefault
+[my_node-1] [INFO] [1684805052.919090726] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: KPIECEkConfigDefault
+[my_node-1] [INFO] [1684805052.919106863] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: RRTkConfigDefault
+[my_node-1] [INFO] [1684805052.919121770] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: RRTConnectkConfigDefault
+[my_node-1] [INFO] [1684805052.919136442] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: RRTstarkConfigDefault
+[my_node-1] [INFO] [1684805052.919151574] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: TRRTkConfigDefault
+[my_node-1] [INFO] [1684805052.919171257] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: PRMkConfigDefault
+[my_node-1] [INFO] [1684805052.919185708] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: PRMstarkConfigDefault
+[my_node-1] [INFO] [1684805052.919199167] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: FMTkConfigDefault
+[my_node-1] [INFO] [1684805052.919216538] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BFMTkConfigDefault
+[my_node-1] [INFO] [1684805052.919233728] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: PDSTkConfigDefault
+[my_node-1] [INFO] [1684805052.919247497] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: STRIDEkConfigDefault
+[my_node-1] [INFO] [1684805052.919267062] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BiTRRTkConfigDefault
+[my_node-1] [INFO] [1684805052.919292362] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LBTRRTkConfigDefault
+[my_node-1] [INFO] [1684805052.919307599] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BiESTkConfigDefault
+[my_node-1] [INFO] [1684805052.919321656] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: ProjESTkConfigDefault
+[my_node-1] [INFO] [1684805052.919336413] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LazyPRMkConfigDefault
+[my_node-1] [INFO] [1684805052.919350448] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LazyPRMstarkConfigDefault
+[my_node-1] [INFO] [1684805052.919364716] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: SPARSkConfigDefault
+[my_node-1] [INFO] [1684805052.919381872] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: SPARStwokConfigDefault
+[my_node-1] [INFO] [1684805052.919397709] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: TrajOptDefault
+[my_node-1] [INFO] [1684805052.919413213] [moveit.ompl_planning.ompl_interface]: Hao: group_name_param: planning_ns.panda_arm_hand
+[my_node-1] [INFO] [1684805052.919415488] [moveit.ompl_planning.ompl_interface]: Hao: acquiring default planner config: planning_ns.panda_arm_hand.default_planner_config.
+[my_node-1] [INFO] [1684805052.919417819] [moveit.ompl_planning.ompl_interface]: Hao: load planner failed, use RRTConnect! Group name: panda_arm_hand.
+[my_node-1] [INFO] [1684805052.919419962] [moveit.ompl_planning.ompl_interface]: Hao: acquiring planner config: planning_ns.panda_arm_hand.planner_configs.
+[my_node-1] [INFO] [1684805052.919424219] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: SBLkConfigDefault
+[my_node-1] [INFO] [1684805052.919438808] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: ESTkConfigDefault
+[my_node-1] [INFO] [1684805052.919453725] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LBKPIECEkConfigDefault
+[my_node-1] [INFO] [1684805052.919475134] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BKPIECEkConfigDefault
+[my_node-1] [INFO] [1684805052.919491007] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: KPIECEkConfigDefault
+[my_node-1] [INFO] [1684805052.919507405] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: RRTkConfigDefault
+[my_node-1] [INFO] [1684805052.919522257] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: RRTConnectkConfigDefault
+[my_node-1] [INFO] [1684805052.919536624] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: RRTstarkConfigDefault
+[my_node-1] [INFO] [1684805052.919552558] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: TRRTkConfigDefault
+[my_node-1] [INFO] [1684805052.919572019] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: PRMkConfigDefault
+[my_node-1] [INFO] [1684805052.919586144] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: PRMstarkConfigDefault
+[my_node-1] [INFO] [1684805052.919599766] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: FMTkConfigDefault
+[my_node-1] [INFO] [1684805052.919617049] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BFMTkConfigDefault
+[my_node-1] [INFO] [1684805052.919634179] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: PDSTkConfigDefault
+[my_node-1] [INFO] [1684805052.919647795] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: STRIDEkConfigDefault
+[my_node-1] [INFO] [1684805052.919665753] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BiTRRTkConfigDefault
+[my_node-1] [INFO] [1684805052.919691444] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LBTRRTkConfigDefault
+[my_node-1] [INFO] [1684805052.919707015] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: BiESTkConfigDefault
+[my_node-1] [INFO] [1684805052.919721673] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: ProjESTkConfigDefault
+[my_node-1] [INFO] [1684805052.919736526] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LazyPRMkConfigDefault
+[my_node-1] [INFO] [1684805052.919750966] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: LazyPRMstarkConfigDefault
+[my_node-1] [INFO] [1684805052.919765793] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: SPARSkConfigDefault
+[my_node-1] [INFO] [1684805052.919783239] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: SPARStwokConfigDefault
+[my_node-1] [INFO] [1684805052.919799503] [moveit.ompl_planning.ompl_interface]: Hao: load planner config: TrajOptDefault
+[my_node-1] [INFO] [1684805052.919814389] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand'
+[my_node-1] [INFO] [1684805052.919824681] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRTConnect
+[my_node-1] [INFO] [1684805052.919830363] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[BFMTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919832548] [moveit.ompl_planning.ompl_interface]:  - balanced = 0
+[my_node-1] [INFO] [1684805052.919834672] [moveit.ompl_planning.ompl_interface]:  - cache_cc = 1
+[my_node-1] [INFO] [1684805052.919836697] [moveit.ompl_planning.ompl_interface]:  - extended_fmt = 1
+[my_node-1] [INFO] [1684805052.919838803] [moveit.ompl_planning.ompl_interface]:  - heuristics = 1
+[my_node-1] [INFO] [1684805052.919840862] [moveit.ompl_planning.ompl_interface]:  - nearest_k = 1
+[my_node-1] [INFO] [1684805052.919842898] [moveit.ompl_planning.ompl_interface]:  - num_samples = 1000
+[my_node-1] [INFO] [1684805052.919844918] [moveit.ompl_planning.ompl_interface]:  - optimality = 1
+[my_node-1] [INFO] [1684805052.919846975] [moveit.ompl_planning.ompl_interface]:  - radius_multiplier = 1.000000
+[my_node-1] [INFO] [1684805052.919848988] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BFMT
+[my_node-1] [INFO] [1684805052.919850700] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[BKPIECEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919852922] [moveit.ompl_planning.ompl_interface]:  - border_fraction = 0.900000
+[my_node-1] [INFO] [1684805052.919854932] [moveit.ompl_planning.ompl_interface]:  - failed_expansion_score_factor = 0.500000
+[my_node-1] [INFO] [1684805052.919857596] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.500000
+[my_node-1] [INFO] [1684805052.919859650] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919864100] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BKPIECE
+[my_node-1] [INFO] [1684805052.919865820] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[BiESTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919867930] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919869982] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BiEST
+[my_node-1] [INFO] [1684805052.919871573] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[BiTRRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919873660] [moveit.ompl_planning.ompl_interface]:  - cost_threshold = 1000000000000000052504760255204420248704468581108159154915854115511802457988908195786371375080447864043704443832883878176942523235360430575644792184786706982848387200926575803737830233794788090059368953234970799945081119038967640880074652742780142494579258788820056842838115669472196386865459400540160.000000
+[my_node-1] [INFO] [1684805052.919876550] [moveit.ompl_planning.ompl_interface]:  - frountier_node_ratio = 0.100000
+[my_node-1] [INFO] [1684805052.919878613] [moveit.ompl_planning.ompl_interface]:  - frountier_threshold = 0.000000
+[my_node-1] [INFO] [1684805052.919880609] [moveit.ompl_planning.ompl_interface]:  - init_temperature = 100
+[my_node-1] [INFO] [1684805052.919882587] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919884561] [moveit.ompl_planning.ompl_interface]:  - temp_change_factor = 0.100000
+[my_node-1] [INFO] [1684805052.919886631] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BiTRRT
+[my_node-1] [INFO] [1684805052.919888238] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[ESTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919890306] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.919892269] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919894236] [moveit.ompl_planning.ompl_interface]:  - type = geometric::EST
+[my_node-1] [INFO] [1684805052.919895809] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[FMTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919897755] [moveit.ompl_planning.ompl_interface]:  - cache_cc = 1
+[my_node-1] [INFO] [1684805052.919899748] [moveit.ompl_planning.ompl_interface]:  - extended_fmt = 1
+[my_node-1] [INFO] [1684805052.919901727] [moveit.ompl_planning.ompl_interface]:  - heuristics = 0
+[my_node-1] [INFO] [1684805052.919903710] [moveit.ompl_planning.ompl_interface]:  - nearest_k = 1
+[my_node-1] [INFO] [1684805052.919905741] [moveit.ompl_planning.ompl_interface]:  - num_samples = 1000
+[my_node-1] [INFO] [1684805052.919907707] [moveit.ompl_planning.ompl_interface]:  - radius_multiplier = 1.100000
+[my_node-1] [INFO] [1684805052.919909653] [moveit.ompl_planning.ompl_interface]:  - type = geometric::FMT
+[my_node-1] [INFO] [1684805052.919911219] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[KPIECEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919913199] [moveit.ompl_planning.ompl_interface]:  - border_fraction = 0.900000
+[my_node-1] [INFO] [1684805052.919915164] [moveit.ompl_planning.ompl_interface]:  - failed_expansion_score_factor = 0.500000
+[my_node-1] [INFO] [1684805052.919917181] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.919919129] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.500000
+[my_node-1] [INFO] [1684805052.919921144] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919923101] [moveit.ompl_planning.ompl_interface]:  - type = geometric::KPIECE
+[my_node-1] [INFO] [1684805052.919924674] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[LBKPIECEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919926721] [moveit.ompl_planning.ompl_interface]:  - border_fraction = 0.900000
+[my_node-1] [INFO] [1684805052.919928675] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.500000
+[my_node-1] [INFO] [1684805052.919930733] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919932687] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LBKPIECE
+[my_node-1] [INFO] [1684805052.919934291] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[LBTRRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919936282] [moveit.ompl_planning.ompl_interface]:  - epsilon = 0.400000
+[my_node-1] [INFO] [1684805052.919940984] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.919943068] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919945062] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LBTRRT
+[my_node-1] [INFO] [1684805052.919946648] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[LazyPRMkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919948608] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919950581] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LazyPRM
+[my_node-1] [INFO] [1684805052.919952176] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[LazyPRMstarkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919954147] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LazyPRMstar
+[my_node-1] [INFO] [1684805052.919955792] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[PDSTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919957746] [moveit.ompl_planning.ompl_interface]:  - type = geometric::PDST
+[my_node-1] [INFO] [1684805052.919959350] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[PRMkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919961316] [moveit.ompl_planning.ompl_interface]:  - max_nearest_neighbors = 10
+[my_node-1] [INFO] [1684805052.919963295] [moveit.ompl_planning.ompl_interface]:  - type = geometric::PRM
+[my_node-1] [INFO] [1684805052.919965826] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[PRMstarkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919967769] [moveit.ompl_planning.ompl_interface]:  - type = geometric::PRMstar
+[my_node-1] [INFO] [1684805052.919969330] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[ProjESTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919972939] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.919974906] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919976926] [moveit.ompl_planning.ompl_interface]:  - type = geometric::ProjEST
+[my_node-1] [INFO] [1684805052.919978872] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[RRTConnectkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919980834] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919982793] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRTConnect
+[my_node-1] [INFO] [1684805052.919984363] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[RRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919986305] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.919988322] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919990343] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRT
+[my_node-1] [INFO] [1684805052.919991922] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[RRTstarkConfigDefault]'
+[my_node-1] [INFO] [1684805052.919993887] [moveit.ompl_planning.ompl_interface]:  - delay_collision_checking = 1
+[my_node-1] [INFO] [1684805052.919995820] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.919997800] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.919999730] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRTstar
+[my_node-1] [INFO] [1684805052.920001321] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[SBLkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920003264] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920005212] [moveit.ompl_planning.ompl_interface]:  - type = geometric::SBL
+[my_node-1] [INFO] [1684805052.920006805] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[SPARSkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920008781] [moveit.ompl_planning.ompl_interface]:  - dense_delta_fraction = 0.001000
+[my_node-1] [INFO] [1684805052.920010787] [moveit.ompl_planning.ompl_interface]:  - max_failures = 1000
+[my_node-1] [INFO] [1684805052.920012769] [moveit.ompl_planning.ompl_interface]:  - sparse_delta_fraction = 0.250000
+[my_node-1] [INFO] [1684805052.920014875] [moveit.ompl_planning.ompl_interface]:  - stretch_factor = 3.000000
+[my_node-1] [INFO] [1684805052.920018550] [moveit.ompl_planning.ompl_interface]:  - type = geometric::SPARS
+[my_node-1] [INFO] [1684805052.920020213] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[SPARStwokConfigDefault]'
+[my_node-1] [INFO] [1684805052.920022198] [moveit.ompl_planning.ompl_interface]:  - dense_delta_fraction = 0.001000
+[my_node-1] [INFO] [1684805052.920024219] [moveit.ompl_planning.ompl_interface]:  - max_failures = 5000
+[my_node-1] [INFO] [1684805052.920026202] [moveit.ompl_planning.ompl_interface]:  - sparse_delta_fraction = 0.250000
+[my_node-1] [INFO] [1684805052.920028186] [moveit.ompl_planning.ompl_interface]:  - stretch_factor = 3.000000
+[my_node-1] [INFO] [1684805052.920030127] [moveit.ompl_planning.ompl_interface]:  - type = geometric::SPARStwo
+[my_node-1] [INFO] [1684805052.920031703] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[STRIDEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920033606] [moveit.ompl_planning.ompl_interface]:  - degree = 16
+[my_node-1] [INFO] [1684805052.920035589] [moveit.ompl_planning.ompl_interface]:  - estimated_dimension = 0.000000
+[my_node-1] [INFO] [1684805052.920037592] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920039567] [moveit.ompl_planning.ompl_interface]:  - max_degree = 18
+[my_node-1] [INFO] [1684805052.920041585] [moveit.ompl_planning.ompl_interface]:  - max_pts_per_leaf = 6
+[my_node-1] [INFO] [1684805052.920043521] [moveit.ompl_planning.ompl_interface]:  - min_degree = 12
+[my_node-1] [INFO] [1684805052.920045483] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.200000
+[my_node-1] [INFO] [1684805052.920047457] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920049415] [moveit.ompl_planning.ompl_interface]:  - type = geometric::STRIDE
+[my_node-1] [INFO] [1684805052.920051377] [moveit.ompl_planning.ompl_interface]:  - use_projected_distance = 0
+[my_node-1] [INFO] [1684805052.920052967] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[TRRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920054922] [moveit.ompl_planning.ompl_interface]:  - frountierNodeRatio = 0.100000
+[my_node-1] [INFO] [1684805052.920056926] [moveit.ompl_planning.ompl_interface]:  - frountier_threshold = 0.000000
+[my_node-1] [INFO] [1684805052.920058914] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920060896] [moveit.ompl_planning.ompl_interface]:  - init_temperature = 0.000010
+[my_node-1] [INFO] [1684805052.920062855] [moveit.ompl_planning.ompl_interface]:  - k_constant = 0.000000
+[my_node-1] [INFO] [1684805052.920064802] [moveit.ompl_planning.ompl_interface]:  - max_states_failed = 10
+[my_node-1] [INFO] [1684805052.920066764] [moveit.ompl_planning.ompl_interface]:  - min_temperature = 0.000000
+[my_node-1] [INFO] [1684805052.920068721] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920070687] [moveit.ompl_planning.ompl_interface]:  - temp_change_factor = 2.000000
+[my_node-1] [INFO] [1684805052.920072672] [moveit.ompl_planning.ompl_interface]:  - type = geometric::TRRT
+[my_node-1] [INFO] [1684805052.920074262] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'hand[TrajOptDefault]'
+[my_node-1] [INFO] [1684805052.920076296] [moveit.ompl_planning.ompl_interface]:  - type = geometric::TrajOpt
+[my_node-1] [INFO] [1684805052.920077865] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm'
+[my_node-1] [INFO] [1684805052.920079858] [moveit.ompl_planning.ompl_interface]:  - max_nearest_neighbors = 10
+[my_node-1] [INFO] [1684805052.920081823] [moveit.ompl_planning.ompl_interface]:  - type = geometric::MyPRM
+[my_node-1] [INFO] [1684805052.920083377] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[BFMTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920085314] [moveit.ompl_planning.ompl_interface]:  - balanced = 0
+[my_node-1] [INFO] [1684805052.920087219] [moveit.ompl_planning.ompl_interface]:  - cache_cc = 1
+[my_node-1] [INFO] [1684805052.920089186] [moveit.ompl_planning.ompl_interface]:  - extended_fmt = 1
+[my_node-1] [INFO] [1684805052.920091136] [moveit.ompl_planning.ompl_interface]:  - heuristics = 1
+[my_node-1] [INFO] [1684805052.920093133] [moveit.ompl_planning.ompl_interface]:  - nearest_k = 1
+[my_node-1] [INFO] [1684805052.920095666] [moveit.ompl_planning.ompl_interface]:  - num_samples = 1000
+[my_node-1] [INFO] [1684805052.920099347] [moveit.ompl_planning.ompl_interface]:  - optimality = 1
+[my_node-1] [INFO] [1684805052.920101447] [moveit.ompl_planning.ompl_interface]:  - radius_multiplier = 1.000000
+[my_node-1] [INFO] [1684805052.920103409] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BFMT
+[my_node-1] [INFO] [1684805052.920105014] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[BKPIECEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920107056] [moveit.ompl_planning.ompl_interface]:  - border_fraction = 0.900000
+[my_node-1] [INFO] [1684805052.920109021] [moveit.ompl_planning.ompl_interface]:  - failed_expansion_score_factor = 0.500000
+[my_node-1] [INFO] [1684805052.920111048] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.500000
+[my_node-1] [INFO] [1684805052.920113018] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920114985] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BKPIECE
+[my_node-1] [INFO] [1684805052.920116570] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[BiESTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920118578] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920120530] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BiEST
+[my_node-1] [INFO] [1684805052.920122197] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[BiTRRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920124296] [moveit.ompl_planning.ompl_interface]:  - cost_threshold = 1000000000000000052504760255204420248704468581108159154915854115511802457988908195786371375080447864043704443832883878176942523235360430575644792184786706982848387200926575803737830233794788090059368953234970799945081119038967640880074652742780142494579258788820056842838115669472196386865459400540160.000000
+[my_node-1] [INFO] [1684805052.920126569] [moveit.ompl_planning.ompl_interface]:  - frountier_node_ratio = 0.100000
+[my_node-1] [INFO] [1684805052.920128614] [moveit.ompl_planning.ompl_interface]:  - frountier_threshold = 0.000000
+[my_node-1] [INFO] [1684805052.920130634] [moveit.ompl_planning.ompl_interface]:  - init_temperature = 100
+[my_node-1] [INFO] [1684805052.920132692] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920134665] [moveit.ompl_planning.ompl_interface]:  - temp_change_factor = 0.100000
+[my_node-1] [INFO] [1684805052.920136652] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BiTRRT
+[my_node-1] [INFO] [1684805052.920138292] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[ESTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920140268] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920142237] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920144191] [moveit.ompl_planning.ompl_interface]:  - type = geometric::EST
+[my_node-1] [INFO] [1684805052.920145761] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[FMTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920147676] [moveit.ompl_planning.ompl_interface]:  - cache_cc = 1
+[my_node-1] [INFO] [1684805052.920149634] [moveit.ompl_planning.ompl_interface]:  - extended_fmt = 1
+[my_node-1] [INFO] [1684805052.920151584] [moveit.ompl_planning.ompl_interface]:  - heuristics = 0
+[my_node-1] [INFO] [1684805052.920153550] [moveit.ompl_planning.ompl_interface]:  - nearest_k = 1
+[my_node-1] [INFO] [1684805052.920155530] [moveit.ompl_planning.ompl_interface]:  - num_samples = 1000
+[my_node-1] [INFO] [1684805052.920157505] [moveit.ompl_planning.ompl_interface]:  - radius_multiplier = 1.100000
+[my_node-1] [INFO] [1684805052.920159449] [moveit.ompl_planning.ompl_interface]:  - type = geometric::FMT
+[my_node-1] [INFO] [1684805052.920161021] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[KPIECEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920163007] [moveit.ompl_planning.ompl_interface]:  - border_fraction = 0.900000
+[my_node-1] [INFO] [1684805052.920164984] [moveit.ompl_planning.ompl_interface]:  - failed_expansion_score_factor = 0.500000
+[my_node-1] [INFO] [1684805052.920166994] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920169422] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.500000
+[my_node-1] [INFO] [1684805052.920171431] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920175208] [moveit.ompl_planning.ompl_interface]:  - type = geometric::KPIECE
+[my_node-1] [INFO] [1684805052.920176913] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[LBKPIECEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920178926] [moveit.ompl_planning.ompl_interface]:  - border_fraction = 0.900000
+[my_node-1] [INFO] [1684805052.920180975] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.500000
+[my_node-1] [INFO] [1684805052.920182966] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920184926] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LBKPIECE
+[my_node-1] [INFO] [1684805052.920186525] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[LBTRRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920188480] [moveit.ompl_planning.ompl_interface]:  - epsilon = 0.400000
+[my_node-1] [INFO] [1684805052.920190412] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920192352] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920194314] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LBTRRT
+[my_node-1] [INFO] [1684805052.920195894] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[LazyPRMkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920197863] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920199822] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LazyPRM
+[my_node-1] [INFO] [1684805052.920201385] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[LazyPRMstarkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920203371] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LazyPRMstar
+[my_node-1] [INFO] [1684805052.920205020] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[MyPRMkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920207023] [moveit.ompl_planning.ompl_interface]:  - max_nearest_neighbors = 10
+[my_node-1] [INFO] [1684805052.920208969] [moveit.ompl_planning.ompl_interface]:  - type = geometric::MyPRM
+[my_node-1] [INFO] [1684805052.920210508] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[MyRRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920212477] [moveit.ompl_planning.ompl_interface]:  - delay_collision_checking = 1
+[my_node-1] [INFO] [1684805052.920214424] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920216362] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920218318] [moveit.ompl_planning.ompl_interface]:  - type = geometric::MyRRT
+[my_node-1] [INFO] [1684805052.920219899] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[PDSTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920221835] [moveit.ompl_planning.ompl_interface]:  - type = geometric::PDST
+[my_node-1] [INFO] [1684805052.920223436] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[PRMkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920225425] [moveit.ompl_planning.ompl_interface]:  - max_nearest_neighbors = 10
+[my_node-1] [INFO] [1684805052.920227378] [moveit.ompl_planning.ompl_interface]:  - type = geometric::PRM
+[my_node-1] [INFO] [1684805052.920228977] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[PRMstarkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920231027] [moveit.ompl_planning.ompl_interface]:  - type = geometric::PRMstar
+[my_node-1] [INFO] [1684805052.920232595] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[ProjESTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920234549] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920236575] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920238521] [moveit.ompl_planning.ompl_interface]:  - type = geometric::ProjEST
+[my_node-1] [INFO] [1684805052.920240054] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[RRTConnectkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920242422] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920244387] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRTConnect
+[my_node-1] [INFO] [1684805052.920247937] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[RRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920250010] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920251977] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920253946] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRT
+[my_node-1] [INFO] [1684805052.920255500] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[RRTstarkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920257498] [moveit.ompl_planning.ompl_interface]:  - delay_collision_checking = 1
+[my_node-1] [INFO] [1684805052.920259442] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920261388] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920263352] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRTstar
+[my_node-1] [INFO] [1684805052.920264939] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[SBLkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920266917] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920268889] [moveit.ompl_planning.ompl_interface]:  - type = geometric::SBL
+[my_node-1] [INFO] [1684805052.920270461] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[SPARSkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920272424] [moveit.ompl_planning.ompl_interface]:  - dense_delta_fraction = 0.001000
+[my_node-1] [INFO] [1684805052.920274424] [moveit.ompl_planning.ompl_interface]:  - max_failures = 1000
+[my_node-1] [INFO] [1684805052.920276409] [moveit.ompl_planning.ompl_interface]:  - sparse_delta_fraction = 0.250000
+[my_node-1] [INFO] [1684805052.920278412] [moveit.ompl_planning.ompl_interface]:  - stretch_factor = 3.000000
+[my_node-1] [INFO] [1684805052.920280339] [moveit.ompl_planning.ompl_interface]:  - type = geometric::SPARS
+[my_node-1] [INFO] [1684805052.920281913] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[SPARStwokConfigDefault]'
+[my_node-1] [INFO] [1684805052.920283881] [moveit.ompl_planning.ompl_interface]:  - dense_delta_fraction = 0.001000
+[my_node-1] [INFO] [1684805052.920285910] [moveit.ompl_planning.ompl_interface]:  - max_failures = 5000
+[my_node-1] [INFO] [1684805052.920287861] [moveit.ompl_planning.ompl_interface]:  - sparse_delta_fraction = 0.250000
+[my_node-1] [INFO] [1684805052.920289853] [moveit.ompl_planning.ompl_interface]:  - stretch_factor = 3.000000
+[my_node-1] [INFO] [1684805052.920291776] [moveit.ompl_planning.ompl_interface]:  - type = geometric::SPARStwo
+[my_node-1] [INFO] [1684805052.920293354] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[STRIDEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920295268] [moveit.ompl_planning.ompl_interface]:  - degree = 16
+[my_node-1] [INFO] [1684805052.920297195] [moveit.ompl_planning.ompl_interface]:  - estimated_dimension = 0.000000
+[my_node-1] [INFO] [1684805052.920299177] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920301126] [moveit.ompl_planning.ompl_interface]:  - max_degree = 18
+[my_node-1] [INFO] [1684805052.920303103] [moveit.ompl_planning.ompl_interface]:  - max_pts_per_leaf = 6
+[my_node-1] [INFO] [1684805052.920305026] [moveit.ompl_planning.ompl_interface]:  - min_degree = 12
+[my_node-1] [INFO] [1684805052.920307007] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.200000
+[my_node-1] [INFO] [1684805052.920308994] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920310958] [moveit.ompl_planning.ompl_interface]:  - type = geometric::STRIDE
+[my_node-1] [INFO] [1684805052.920312932] [moveit.ompl_planning.ompl_interface]:  - use_projected_distance = 0
+[my_node-1] [INFO] [1684805052.920314516] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[TRRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920316478] [moveit.ompl_planning.ompl_interface]:  - frountierNodeRatio = 0.100000
+[my_node-1] [INFO] [1684805052.920318925] [moveit.ompl_planning.ompl_interface]:  - frountier_threshold = 0.000000
+[my_node-1] [INFO] [1684805052.920320912] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920322879] [moveit.ompl_planning.ompl_interface]:  - init_temperature = 0.000010
+[my_node-1] [INFO] [1684805052.920326614] [moveit.ompl_planning.ompl_interface]:  - k_constant = 0.000000
+[my_node-1] [INFO] [1684805052.920328660] [moveit.ompl_planning.ompl_interface]:  - max_states_failed = 10
+[my_node-1] [INFO] [1684805052.920330654] [moveit.ompl_planning.ompl_interface]:  - min_temperature = 0.000000
+[my_node-1] [INFO] [1684805052.920332648] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920334593] [moveit.ompl_planning.ompl_interface]:  - temp_change_factor = 2.000000
+[my_node-1] [INFO] [1684805052.920336637] [moveit.ompl_planning.ompl_interface]:  - type = geometric::TRRT
+[my_node-1] [INFO] [1684805052.920338247] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm[TrajOptDefault]'
+[my_node-1] [INFO] [1684805052.920340214] [moveit.ompl_planning.ompl_interface]:  - type = geometric::TrajOpt
+[my_node-1] [INFO] [1684805052.920341769] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand'
+[my_node-1] [INFO] [1684805052.920343791] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRTConnect
+[my_node-1] [INFO] [1684805052.920345349] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[BFMTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920347271] [moveit.ompl_planning.ompl_interface]:  - balanced = 0
+[my_node-1] [INFO] [1684805052.920349213] [moveit.ompl_planning.ompl_interface]:  - cache_cc = 1
+[my_node-1] [INFO] [1684805052.920351244] [moveit.ompl_planning.ompl_interface]:  - extended_fmt = 1
+[my_node-1] [INFO] [1684805052.920353221] [moveit.ompl_planning.ompl_interface]:  - heuristics = 1
+[my_node-1] [INFO] [1684805052.920355217] [moveit.ompl_planning.ompl_interface]:  - nearest_k = 1
+[my_node-1] [INFO] [1684805052.920357203] [moveit.ompl_planning.ompl_interface]:  - num_samples = 1000
+[my_node-1] [INFO] [1684805052.920359177] [moveit.ompl_planning.ompl_interface]:  - optimality = 1
+[my_node-1] [INFO] [1684805052.920361156] [moveit.ompl_planning.ompl_interface]:  - radius_multiplier = 1.000000
+[my_node-1] [INFO] [1684805052.920363101] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BFMT
+[my_node-1] [INFO] [1684805052.920364827] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[BKPIECEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920366805] [moveit.ompl_planning.ompl_interface]:  - border_fraction = 0.900000
+[my_node-1] [INFO] [1684805052.920368778] [moveit.ompl_planning.ompl_interface]:  - failed_expansion_score_factor = 0.500000
+[my_node-1] [INFO] [1684805052.920370787] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.500000
+[my_node-1] [INFO] [1684805052.920372755] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920374722] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BKPIECE
+[my_node-1] [INFO] [1684805052.920376280] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[BiESTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920378234] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920380270] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BiEST
+[my_node-1] [INFO] [1684805052.920381844] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[BiTRRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920383892] [moveit.ompl_planning.ompl_interface]:  - cost_threshold = 1000000000000000052504760255204420248704468581108159154915854115511802457988908195786371375080447864043704443832883878176942523235360430575644792184786706982848387200926575803737830233794788090059368953234970799945081119038967640880074652742780142494579258788820056842838115669472196386865459400540160.000000
+[my_node-1] [INFO] [1684805052.920386060] [moveit.ompl_planning.ompl_interface]:  - frountier_node_ratio = 0.100000
+[my_node-1] [INFO] [1684805052.920388067] [moveit.ompl_planning.ompl_interface]:  - frountier_threshold = 0.000000
+[my_node-1] [INFO] [1684805052.920390057] [moveit.ompl_planning.ompl_interface]:  - init_temperature = 100
+[my_node-1] [INFO] [1684805052.920392541] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920394521] [moveit.ompl_planning.ompl_interface]:  - temp_change_factor = 0.100000
+[my_node-1] [INFO] [1684805052.920396491] [moveit.ompl_planning.ompl_interface]:  - type = geometric::BiTRRT
+[my_node-1] [INFO] [1684805052.920398111] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[ESTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920401871] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920403930] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920405936] [moveit.ompl_planning.ompl_interface]:  - type = geometric::EST
+[my_node-1] [INFO] [1684805052.920407544] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[FMTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920409481] [moveit.ompl_planning.ompl_interface]:  - cache_cc = 1
+[my_node-1] [INFO] [1684805052.920411529] [moveit.ompl_planning.ompl_interface]:  - extended_fmt = 1
+[my_node-1] [INFO] [1684805052.920413487] [moveit.ompl_planning.ompl_interface]:  - heuristics = 0
+[my_node-1] [INFO] [1684805052.920415456] [moveit.ompl_planning.ompl_interface]:  - nearest_k = 1
+[my_node-1] [INFO] [1684805052.920417435] [moveit.ompl_planning.ompl_interface]:  - num_samples = 1000
+[my_node-1] [INFO] [1684805052.920419488] [moveit.ompl_planning.ompl_interface]:  - radius_multiplier = 1.100000
+[my_node-1] [INFO] [1684805052.920421543] [moveit.ompl_planning.ompl_interface]:  - type = geometric::FMT
+[my_node-1] [INFO] [1684805052.920423098] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[KPIECEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920425057] [moveit.ompl_planning.ompl_interface]:  - border_fraction = 0.900000
+[my_node-1] [INFO] [1684805052.920427001] [moveit.ompl_planning.ompl_interface]:  - failed_expansion_score_factor = 0.500000
+[my_node-1] [INFO] [1684805052.920429021] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920430979] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.500000
+[my_node-1] [INFO] [1684805052.920432994] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920434952] [moveit.ompl_planning.ompl_interface]:  - type = geometric::KPIECE
+[my_node-1] [INFO] [1684805052.920436534] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[LBKPIECEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920438497] [moveit.ompl_planning.ompl_interface]:  - border_fraction = 0.900000
+[my_node-1] [INFO] [1684805052.920440460] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.500000
+[my_node-1] [INFO] [1684805052.920442460] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920444434] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LBKPIECE
+[my_node-1] [INFO] [1684805052.920446037] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[LBTRRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920447993] [moveit.ompl_planning.ompl_interface]:  - epsilon = 0.400000
+[my_node-1] [INFO] [1684805052.920449942] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920451881] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920453832] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LBTRRT
+[my_node-1] [INFO] [1684805052.920455404] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[LazyPRMkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920457354] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920459314] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LazyPRM
+[my_node-1] [INFO] [1684805052.920460878] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[LazyPRMstarkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920462829] [moveit.ompl_planning.ompl_interface]:  - type = geometric::LazyPRMstar
+[my_node-1] [INFO] [1684805052.920464457] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[PDSTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920466398] [moveit.ompl_planning.ompl_interface]:  - type = geometric::PDST
+[my_node-1] [INFO] [1684805052.920468621] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[PRMkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920470613] [moveit.ompl_planning.ompl_interface]:  - max_nearest_neighbors = 10
+[my_node-1] [INFO] [1684805052.920472541] [moveit.ompl_planning.ompl_interface]:  - type = geometric::PRM
+[my_node-1] [INFO] [1684805052.920474096] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[PRMstarkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920477708] [moveit.ompl_planning.ompl_interface]:  - type = geometric::PRMstar
+[my_node-1] [INFO] [1684805052.920479541] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[ProjESTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920481495] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920483477] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920485424] [moveit.ompl_planning.ompl_interface]:  - type = geometric::ProjEST
+[my_node-1] [INFO] [1684805052.920487013] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[RRTConnectkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920488935] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920490896] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRTConnect
+[my_node-1] [INFO] [1684805052.920492461] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[RRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920494414] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920496364] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920498340] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRT
+[my_node-1] [INFO] [1684805052.920499921] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[RRTstarkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920501882] [moveit.ompl_planning.ompl_interface]:  - delay_collision_checking = 1
+[my_node-1] [INFO] [1684805052.920503831] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920505783] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920507744] [moveit.ompl_planning.ompl_interface]:  - type = geometric::RRTstar
+[my_node-1] [INFO] [1684805052.920509323] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[SBLkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920511280] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920513242] [moveit.ompl_planning.ompl_interface]:  - type = geometric::SBL
+[my_node-1] [INFO] [1684805052.920514810] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[SPARSkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920516766] [moveit.ompl_planning.ompl_interface]:  - dense_delta_fraction = 0.001000
+[my_node-1] [INFO] [1684805052.920518780] [moveit.ompl_planning.ompl_interface]:  - max_failures = 1000
+[my_node-1] [INFO] [1684805052.920520759] [moveit.ompl_planning.ompl_interface]:  - sparse_delta_fraction = 0.250000
+[my_node-1] [INFO] [1684805052.920522757] [moveit.ompl_planning.ompl_interface]:  - stretch_factor = 3.000000
+[my_node-1] [INFO] [1684805052.920524701] [moveit.ompl_planning.ompl_interface]:  - type = geometric::SPARS
+[my_node-1] [INFO] [1684805052.920526285] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[SPARStwokConfigDefault]'
+[my_node-1] [INFO] [1684805052.920528220] [moveit.ompl_planning.ompl_interface]:  - dense_delta_fraction = 0.001000
+[my_node-1] [INFO] [1684805052.920530218] [moveit.ompl_planning.ompl_interface]:  - max_failures = 5000
+[my_node-1] [INFO] [1684805052.920532174] [moveit.ompl_planning.ompl_interface]:  - sparse_delta_fraction = 0.250000
+[my_node-1] [INFO] [1684805052.920534174] [moveit.ompl_planning.ompl_interface]:  - stretch_factor = 3.000000
+[my_node-1] [INFO] [1684805052.920536141] [moveit.ompl_planning.ompl_interface]:  - type = geometric::SPARStwo
+[my_node-1] [INFO] [1684805052.920537718] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[STRIDEkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920539658] [moveit.ompl_planning.ompl_interface]:  - degree = 16
+[my_node-1] [INFO] [1684805052.920542169] [moveit.ompl_planning.ompl_interface]:  - estimated_dimension = 0.000000
+[my_node-1] [INFO] [1684805052.920544154] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920546108] [moveit.ompl_planning.ompl_interface]:  - max_degree = 18
+[my_node-1] [INFO] [1684805052.920548094] [moveit.ompl_planning.ompl_interface]:  - max_pts_per_leaf = 6
+[my_node-1] [INFO] [1684805052.920550065] [moveit.ompl_planning.ompl_interface]:  - min_degree = 12
+[my_node-1] [INFO] [1684805052.920553702] [moveit.ompl_planning.ompl_interface]:  - min_valid_path_fraction = 0.200000
+[my_node-1] [INFO] [1684805052.920555778] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920557726] [moveit.ompl_planning.ompl_interface]:  - type = geometric::STRIDE
+[my_node-1] [INFO] [1684805052.920559707] [moveit.ompl_planning.ompl_interface]:  - use_projected_distance = 0
+[my_node-1] [INFO] [1684805052.920561299] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[TRRTkConfigDefault]'
+[my_node-1] [INFO] [1684805052.920563261] [moveit.ompl_planning.ompl_interface]:  - frountierNodeRatio = 0.100000
+[my_node-1] [INFO] [1684805052.920565257] [moveit.ompl_planning.ompl_interface]:  - frountier_threshold = 0.000000
+[my_node-1] [INFO] [1684805052.920567245] [moveit.ompl_planning.ompl_interface]:  - goal_bias = 0.050000
+[my_node-1] [INFO] [1684805052.920569184] [moveit.ompl_planning.ompl_interface]:  - init_temperature = 0.000010
+[my_node-1] [INFO] [1684805052.920571146] [moveit.ompl_planning.ompl_interface]:  - k_constant = 0.000000
+[my_node-1] [INFO] [1684805052.920573360] [moveit.ompl_planning.ompl_interface]:  - max_states_failed = 10
+[my_node-1] [INFO] [1684805052.920575316] [moveit.ompl_planning.ompl_interface]:  - min_temperature = 0.000000
+[my_node-1] [INFO] [1684805052.920577254] [moveit.ompl_planning.ompl_interface]:  - range = 0.000000
+[my_node-1] [INFO] [1684805052.920579209] [moveit.ompl_planning.ompl_interface]:  - temp_change_factor = 2.000000
+[my_node-1] [INFO] [1684805052.920581186] [moveit.ompl_planning.ompl_interface]:  - type = geometric::TRRT
+[my_node-1] [INFO] [1684805052.920582762] [moveit.ompl_planning.ompl_interface]: Parameters for configuration 'panda_arm_hand[TrajOptDefault]'
+[my_node-1] [INFO] [1684805052.920584753] [moveit.ompl_planning.ompl_interface]:  - type = geometric::TrajOpt
+[my_node-1] [INFO] [1684805052.920767045] [my_planner]: Planning Plugin Name 'ompl_interface/OMPLPlanner'
+[my_node-1] [INFO] [1684805052.920769917] [my_planner]: Using planning interface 'OMPL'
+[my_node-1] [INFO] [1684805052.922343456] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.0014369 seconds
+[my_node-1] [INFO] [1684805052.922353974] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[my_node-1] [INFO] [1684805052.936752335] [move_group_interface]: Ready to take commands for planning group panda_arm.
+[my_node-1] [INFO] [1684805052.938220789] [motion_planning_hao.remote_control]: RemoteControl Ready.
+[my_node-1] [INFO] [1684805052.938277142] [motion_planning_hao.remote_control]: Waiting to continue: Press 'next' in the RvizVisualToolsGui window to start the demo
+
+```
+
+Here I added many debug logs which start with "Hao:", and we can see the application is now waiting for us to click the "Next" in RvizVisualToolsGui panel, and when we click the "Next", the application will keep running and do the planning, see below logs:
+
+```
+[my_node-1] [INFO] [1684805185.887297186] [motion_planning_hao.remote_control]: ... continuing
+[my_node-1] [INFO] [1684805185.887365731] [moveit.ompl_planning.planning_context_manager]: Hao: req planner id: , req group name: panda_arm, found pc!
+[my_node-1] [INFO] [1684805185.887369810] [moveit.ompl_planning.planning_context_manager]: Hao: getPlanningContext, 480
+[my_node-1] [INFO] [1684805185.887372055] [moveit.ompl_planning.planning_context_manager]: Hao: getPlanningContext, 488
+[my_node-1] [INFO] [1684805185.887373565] [moveit.ompl_planning.planning_context_manager]: Hao: getPlanningContext, 508
+[my_node-1] [INFO] [1684805185.887379699] [moveit.ompl_planning.planning_context_manager]: Hao: dump the conguration panda_arm:panda_arm based on requests:
+[my_node-1] [INFO] [1684805185.887383762] [moveit.ompl_planning.planning_context_manager]:  - max_nearest_neighbors = 10
+[my_node-1] [INFO] [1684805185.887386379] [moveit.ompl_planning.planning_context_manager]:  - type = geometric::MyPRM
+[my_node-1] [INFO] [1684805185.887398925] [moveit.ompl_planning.planning_context_manager]: Hao: getPlanningContext, 557
+[my_node-1] [INFO] [1684805185.887564500] [moveit.ompl_planning.planning_context_manager]: Hao: getPlanningContext, 578
+[my_node-1] [ERROR] [1684805185.887608105] [moveit_robot_state.conversions]: Found empty JointState message
+[my_node-1] [INFO] [1684805185.887629947] [moveit_planning_interface.planning_interface]: The timeout for planning must be positive (0.000000 specified). Assuming one second instead.
+[my_node-1] [WARN] [1684805185.887639833] [moveit.ompl_planning.model_based_planning_context]: It looks like the planning volume was not specified.
+[my_node-1] [INFO] [1684805185.887935954] [moveit.ompl_planning.model_based_planning_context]: Planner configuration 'panda_arm' will use planner 'geometric::MyPRM'. Additional configuration parameters will be set when the planner is constructed.
+[my_node-1] [WARN] [1684805185.888100546] [ompl]: /home/hao/Workspace/COMP8604/ROS/workspaces/moveit2_ws/src/customized_planner/src/MyPRM.cpp:95 - Hao: MyPRM,95
+[my_node-1] [INFO] [1684805185.888214365] [moveit.ompl_planning.planning_context_manager]: Hao: getPlanningContext, 613
+[my_node-1] [WARN] [1684805185.888236187] [ompl]: /home/hao/Workspace/COMP8604/ROS/workspaces/moveit2_ws/src/customized_planner/src/MyPRM.cpp:450 - Hao: solve,450
+
+```
+
+Now we can clearly see the algorithm "MyPRM" is used for planning, and the printing in "solve" function in "MyPRM.cpp" also confirms this. The Rviz visual tools also visual the planning results by our "MyPRM" planning algorithm.
+
+![a](images/4.3.5.png)
