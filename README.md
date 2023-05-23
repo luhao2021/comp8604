@@ -1262,9 +1262,25 @@ ros2 pkg create --build-type ament_cmake customized_planner
 
 Then, we create below directory structure:
 
-![a](images/4.1.2.png)
+```
+$ tree src/customized_planner/
+src/customized_planner/
+├── CMakeLists.txt
+├── include
+│   └── customized_planner
+│       ├── ConnectionStrategy.h
+│       ├── MyPRM.h
+│       └── MyRRT.h
+├── package.xml
+└── src
+    ├── GoalVisitor.hpp
+    ├── MyPRM.cpp
+    └── MyRRT.cpp
 
-We can see from the screenshot that we create our own copy of PRM and RRT algorithm, which are both from OMPL source code. We put the .cpp files into src folder, and header files in include/customized_planner folder.
+3 directories, 8 files
+```
+
+We can see that we create our own copy of PRM and RRT algorithm, which are both from OMPL source code. We put the .cpp files into src folder, and header files in include/customized_planner folder.
 
 Now we begin to write our own CMakeLists.txt as we need to add dependency so that our algorithm can be correctly built by ROS2 building system. We add below line to do this:
 
